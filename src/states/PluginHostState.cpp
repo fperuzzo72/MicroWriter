@@ -237,10 +237,21 @@ StateTransition PluginHostState::update(Core& core) {
           }
           break;
         case BleKey::KEY_RETURN:
-          if (plugin_->handleChar('\n')) needsRender_ = true;
+          // Text plugins consume '\n' directly. Plugins that don't handle
+          // chars (e.g. the Game Boy emulator) fall back to Center — same
+          // button the physical d-pad's Center press sends, including its
+          // single-tap-A / double-tap-Select disambiguation.
+          if (!plugin_->handleChar('\n')) {
+            plugin_->handleInput(PluginButton::Center);
+          }
+          needsRender_ = true;
           break;
         case BleKey::KEY_TAB:
-          if (plugin_->handleChar('\t')) needsRender_ = true;
+          // Same pattern as Return above, but for Start (Power button).
+          if (!plugin_->handleChar('\t')) {
+            plugin_->handleInput(PluginButton::Power);
+          }
+          needsRender_ = true;
           break;
         case BleKey::KEY_BACKSPACE: {
           // Send backspace as char first; if not consumed, treat as Back button
@@ -277,6 +288,24 @@ StateTransition PluginHostState::update(Core& core) {
           plugin_->handleInput(PluginButton::Center); needsRender_ = true; break;
         default: break;
       }
+    }
+
+    // Surface the matching handleRelease() for whichever button-producing
+    // key was just let go. poll() above only ever reports presses; plugins
+    // that track held state (e.g. the Game Boy emulator's D-pad/buttons)
+    // need the release too, or the input stays "stuck" pressed.
+    switch (ble::takeReleasedKey()) {
+      case BleKey::KEY_UP:      plugin_->handleRelease(PluginButton::Up); break;
+      case BleKey::KEY_DOWN:    plugin_->handleRelease(PluginButton::Down); break;
+      case BleKey::KEY_LEFT:    plugin_->handleRelease(PluginButton::Left); break;
+      case BleKey::KEY_RIGHT:   plugin_->handleRelease(PluginButton::Right); break;
+      case BleKey::KEY_ESCAPE:  plugin_->handleRelease(PluginButton::Back); break;
+      case BleKey::KEY_RETURN:  plugin_->handleRelease(PluginButton::Center); break;
+      case BleKey::KEY_TAB:     plugin_->handleRelease(PluginButton::Power); break;
+      case BleKey::ENTER:       plugin_->handleRelease(PluginButton::Center); break;
+      case BleKey::PAGE_NEXT:   plugin_->handleRelease(PluginButton::Down); break;
+      case BleKey::PAGE_PREV:   plugin_->handleRelease(PluginButton::Up); break;
+      default: break;
     }
   }
 #endif

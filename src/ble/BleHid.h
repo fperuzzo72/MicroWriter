@@ -57,6 +57,16 @@ bool reconnect(const char* addr);
 // Poll for input (non-blocking)
 BleKey poll();
 
+// Returns the key that was just released (physically let go on the
+// keyboard), or BleKey::NONE if nothing was released since the last call.
+// Clears on read. Needed by press/release-driven consumers (e.g. the Game
+// Boy plugin's D-pad/buttons) — poll() only ever reports presses.
+// Caveat: the underlying HID report tracks one "primary" held key for
+// repeat purposes, so simultaneous multi-key holds (e.g. two D-pad
+// directions at once) are not individually tracked — only the most
+// recently pressed key's release is reported.
+BleKey takeReleasedKey();
+
 // Last character from KEY_CHAR event
 char lastChar();
 

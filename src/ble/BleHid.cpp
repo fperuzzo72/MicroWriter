@@ -106,6 +106,9 @@ struct {
     bool repeating = false;
 } _repeat;
 
+// Key released since the last takeReleasedKey() call, or NONE.
+static BleKey _lastReleased = BleKey::NONE;
+
 void repeatClear() {
     _repeat.keycode = 0;
     _repeat.bleKey = BleKey::NONE;
@@ -341,6 +344,7 @@ void onHIDReport(NimBLERemoteCharacteristic* chr, uint8_t* data, size_t length, 
 
         uint8_t held = primaryHeldKey(data, length);
         if (_repeat.keycode != 0 && held != _repeat.keycode) {
+            _lastReleased = _repeat.bleKey;
             repeatClear();
         }
 
@@ -836,6 +840,12 @@ BleKey poll() {
     if (!popKey(evt)) return BleKey::NONE;
     if (evt.ch != 0) _lastChar = evt.ch;
     return evt.key;
+}
+
+BleKey takeReleasedKey() {
+    BleKey k = _lastReleased;
+    _lastReleased = BleKey::NONE;
+    return k;
 }
 
 char lastChar()              { return _lastChar; }
