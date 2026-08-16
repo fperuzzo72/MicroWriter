@@ -1,0 +1,5 @@
+{
+  "name": "HardwareDetect",
+  "version": "1.0.0",
+  "description": "Runtime detection of Xteink X3 vs X4 hardware via I2C fingerprint probing."
+}

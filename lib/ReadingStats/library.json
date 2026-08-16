@@ -1,0 +1,5 @@
+{
+  "name": "ReadingStats",
+  "version": "1.0.0",
+  "description": "Per-book reading time, session count, and streak tracking for SUMI"
+}

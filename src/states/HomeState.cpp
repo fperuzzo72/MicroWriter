@@ -1,0 +1,616 @@
+#include "HomeState.h"
+
+#include <Arduino.h>
+#include <Bitmap.h>
+#include <CoverHelpers.h>
+#include <GfxRenderer.h>
+#include <SDCardManager.h>
+#include <Utf8.h>
+#include <esp_system.h>
+
+#include <algorithm>
+#include <cmath>
+
+#include "../config.h"
+#include "../core/BootMode.h"
+#include "../core/Core.h"
+#include "../core/InputDrainGuard.h"
+#include "../content/LibraryIndex.h"
+#include "../content/RecentBooks.h"
+#include "Battery.h"
+#include "FontManager.h"
+#include "MappedInputManager.h"
+#include "ThemeManager.h"
+#include "../assets/sumi_home_bg.h"
+
+namespace sumi {
+
+HomeState::HomeState(GfxRenderer& renderer) : renderer_(renderer) {}
+
+HomeState::~HomeState() = default;
+
+void HomeState::enter(Core& core) {
+  // Drain queued button events so a power-button wake doesn't trigger actions
+  InputDrainGuard::drain(core);
+
+  Serial.println("[HOME] Entering");
+  core_ = &core;  // Store for theme loading
+
+  // Enable sumi-e art background
+  view_.useArtBackground = true;
+
+  // Load last book info if content is still open
+  loadLastBook(core);
+  
+  // Load recent books for carousel
+  loadRecentBooks(core);
+
+  // Update battery
+  updateBattery();
+
+  view_.needsRender = true;
+}
+
+void HomeState::exit(Core& core) {
+  Serial.println("[HOME] Exiting");
+  view_.clear();
+}
+
+void HomeState::loadLastBook(Core& core) {
+  // Reset cover state
+  coverBmpPath_.clear();
+  hasCoverImage_ = false;
+  coverLoadFailed_ = false;
+  currentBookHash_ = 0;
+
+  // If content already open, use it
+  if (core.content.isOpen()) {
+    const auto& meta = core.content.metadata();
+    view_.setBook(meta.title, meta.author, core.buf.path);
+    currentBookHash_ = LibraryIndex::hashPath(core.buf.path);
+
+    if (core.settings.showImages) {
+      coverBmpPath_ = core.content.getThumbnailPath();
+      if (!coverBmpPath_.empty() && SdMan.exists(coverBmpPath_.c_str())) {
+        hasCoverImage_ = true;
+      }
+    }
+    view_.hasCoverBmp = hasCoverImage_;
+    return;
+  }
+
+  // Try to get book info from RecentBooks (avoids opening EPUB just for metadata)
+  const char* savedPath = core.settings.lastBookPath;
+  if (savedPath[0] == '\0' || !core.storage.exists(savedPath)) {
+    view_.clearBook();
+    return;
+  }
+
+  // Try RecentBooks for title/author (much cheaper than opening EPUB)
+  RecentBooks::Entry recentEntry;
+  if (RecentBooks::getMostRecent(core, recentEntry) && strcmp(recentEntry.path, savedPath) == 0) {
+    view_.setBook(recentEntry.title, recentEntry.author, savedPath);
+    utf8SafeCopy(core.buf.path, savedPath, sizeof(core.buf.path));
+    
+    // Use persisted thumbnail path from RecentBooks (no hash re-derivation)
+    uint32_t hash = LibraryIndex::hashPath(savedPath);
+    currentBookHash_ = hash;
+    if (core.settings.showImages && recentEntry.hasThumb() && SdMan.exists(recentEntry.thumbPath)) {
+      coverBmpPath_ = recentEntry.thumbPath;
+      hasCoverImage_ = true;
+    }
+    view_.hasCoverBmp = hasCoverImage_;
+
+    // Get progress from LibraryIndex - use minimal stack
+    LibraryIndex::Entry libEntry;
+    if (LibraryIndex::findByHash(core, hash, libEntry)) {
+      view_.bookCurrentPage = libEntry.currentPage;
+      view_.bookTotalPages = libEntry.totalPages;
+      view_.bookProgress = libEntry.progressPercent();
+      const char* dot = strrchr(savedPath, '.');
+      view_.isChapterBased = dot && (strcasecmp(dot, ".epub") == 0);
+    }
+    return;
+  }
+  
+  // Fallback: Open content to get metadata (slower, uses more memory).
+  // Skip when heap is fragmented — a large EPUB like Les Misérables can
+  // trigger std::bad_alloc inside ContentOpfParser which ESP-IDF can't
+  // unwind, crashing the device. Better to show the path without
+  // title/cover than to risk a boot-loop. RecentBooks will pick up
+  // metadata the first time the user actually opens the book.
+  if (ESP.getMaxAllocHeap() < 16384) {
+    Serial.printf("[HOME] Heap too tight (largest=%u) for EPUB pre-load, showing path only\n",
+                  ESP.getMaxAllocHeap());
+    const char* filename = strrchr(savedPath, '/');
+    filename = filename ? filename + 1 : savedPath;
+    view_.setBook(filename, "", savedPath);
+    utf8SafeCopy(core.buf.path, savedPath, sizeof(core.buf.path));
+    currentBookHash_ = LibraryIndex::hashPath(savedPath);
+    view_.hasCoverBmp = false;
+    return;
+  }
+
+  // Reader-crash guard: if the previous session crashed while opening a
+  // book, main.cpp's boot logic routes us to Home instead of auto-
+  // resuming Reader (see "Reader crash guard: going Home"). But if we
+  // then turn around and open the SAME EPUB here just to grab metadata
+  // for the home card, we re-hit the parser bug and loop. Skip the
+  // open and show the filename — exactly what the heap-tight fallback
+  // above does. The user can still navigate to a different book; the
+  // bad one will only get re-attempted when they explicitly open it
+  // from the file browser. Aozora-derived EPUBs (こころ #00773 and
+  // friends) reliably trip this — their content.opf takes 67+ seconds
+  // and the nav.xhtml TOC parse throws bad_alloc.
+  if (core.settings.readerLoadAttempts > 0) {
+    Serial.printf("[HOME] Previous session crashed (attempts=%d) — skipping EPUB pre-load for %s\n",
+                  core.settings.readerLoadAttempts, savedPath);
+    const char* filename = strrchr(savedPath, '/');
+    filename = filename ? filename + 1 : savedPath;
+    view_.setBook(filename, "", savedPath);
+    utf8SafeCopy(core.buf.path, savedPath, sizeof(core.buf.path));
+    currentBookHash_ = LibraryIndex::hashPath(savedPath);
+    view_.hasCoverBmp = false;
+    return;
+  }
+
+  auto result = core.content.open(savedPath, SUMI_CACHE_DIR);
+  if (result.ok()) {
+    const auto& meta = core.content.metadata();
+    view_.setBook(meta.title, meta.author, savedPath);
+    utf8SafeCopy(core.buf.path, savedPath, sizeof(core.buf.path));
+    currentBookHash_ = LibraryIndex::hashPath(savedPath);
+
+    if (core.settings.showImages) {
+      coverBmpPath_ = core.content.getThumbnailPath();
+      if (!coverBmpPath_.empty() && SdMan.exists(coverBmpPath_.c_str())) {
+        hasCoverImage_ = true;
+      }
+    }
+    view_.hasCoverBmp = hasCoverImage_;
+    core.content.close();
+  } else {
+    view_.clearBook();
+  }
+}
+
+void HomeState::updateBattery() {
+  int percent = batteryMonitor.readPercentage();
+  view_.setBattery(percent);
+}
+
+void HomeState::loadRecentBooks(Core& core) {
+  view_.clearRecentBooks();
+  
+  // Load all recent books (current book is shown separately as main card)
+  RecentBooks::Entry entries[RecentBooks::MAX_RECENT];
+  int count = RecentBooks::loadAll(core, entries, RecentBooks::MAX_RECENT);
+  
+  // Skip the first one if it matches current book (it's already shown as main)
+  int startIdx = 0;
+  if (count > 0 && view_.hasBook && strcmp(entries[0].path, view_.bookPath) == 0) {
+    startIdx = 1;
+  }
+  
+  // Add remaining recent books with persisted thumbnail paths
+  for (int i = startIdx; i < count && view_.recentBookCount < ui::HomeView::MAX_RECENT_BOOKS; i++) {
+    view_.addRecentBook(entries[i].title, entries[i].author, entries[i].path,
+                        entries[i].progress, entries[i].hasThumb(),
+                        entries[i].thumbPath);
+  }
+  
+  Serial.printf("[HOME] Loaded %d recent books (showing %d)\n", count, view_.recentBookCount);
+}
+
+void HomeState::openSelectedBook(Core& core) {
+  const char* path = view_.getSelectedPath();
+  if (path && path[0] != '\0') {
+    utf8SafeCopy(core.buf.path, path, sizeof(core.buf.path));
+    // Save lastBookPath for "continue reading" on next cold boot
+    utf8SafeCopy(core.settings.lastBookPath, core.buf.path, sizeof(core.settings.lastBookPath));
+    core.settings.transitionReturnTo = 0;  // ReturnTo::HOME
+    core.settings.saveToFile();
+    pendingOpen_ = true;
+  }
+}
+
+void HomeState::updateSelectedBook(Core& core) {
+  // When user switches to a different book in carousel, update the card display
+  
+  // Reset cover state - will be reloaded for new selection
+  coverLoadFailed_ = false;
+  hasCoverImage_ = false;
+  coverBmpPath_.clear();
+  
+  if (view_.selectedBookIndex == 0) {
+    // Back to current book - reload from open content or settings
+    Serial.println("[HOME] Selected current book - reloading");
+    loadLastBook(core);
+  } else {
+    // Selected a recent book - copy its info. selectedBookIndex is
+    // bounded by selectNextBook/selectPrevBook's modular arithmetic
+    // (always [0, recentBookCount]), but a stale value e.g. after a
+    // recentBookCount shrink could leave recentIdx negative or past
+    // the array — explicit lower bound + range check on both ends.
+    int recentIdx = view_.selectedBookIndex - 1;
+    if (recentIdx >= 0 && recentIdx < view_.recentBookCount) {
+      const auto& recent = view_.recentBooks[recentIdx];
+      Serial.printf("[HOME] Selected recent book %d: %s\n", recentIdx, recent.title);
+      
+      view_.setBook(recent.title, recent.author, recent.path);
+
+      // Compute cover path for this book
+      uint32_t hash = LibraryIndex::hashPath(recent.path);
+      currentBookHash_ = hash;  // Store for flash cache
+
+      // Get full progress info from LibraryIndex
+      LibraryIndex::Entry libEntry;
+      if (LibraryIndex::findByHash(core, hash, libEntry)) {
+        view_.bookCurrentPage = libEntry.currentPage;
+        view_.bookTotalPages = libEntry.totalPages;
+        view_.bookProgress = libEntry.progressPercent();
+        const char* dot = strrchr(recent.path, '.');
+        view_.isChapterBased = dot && (strcasecmp(dot, ".epub") == 0);
+      } else {
+        view_.bookProgress = recent.progress;
+        view_.bookCurrentPage = 0;
+        view_.bookTotalPages = 0;
+        view_.isChapterBased = true;
+      }
+
+      // Use persisted thumbnail path from RecentBooks
+      if (core.settings.showImages && recent.thumbPath[0] != '\0' && SdMan.exists(recent.thumbPath)) {
+        coverBmpPath_ = recent.thumbPath;
+        hasCoverImage_ = true;
+      }
+    }
+  }
+  
+  view_.hasCoverBmp = hasCoverImage_;
+  view_.needsRender = true;
+}
+
+StateTransition HomeState::update(Core& core) {
+  Event e;
+  while (core.events.pop(e)) {
+    switch (e.type) {
+      case EventType::ButtonPress:
+        switch (e.button) {
+          case Button::Back:
+            // Back on Home is a no-op. Previous behavior resumed the
+            // current book, which duplicated Center and confused users
+            // ("Back button opens the book?!"). To reach the book just
+            // press Center like every other "open" in SUMI.
+            break;
+
+          case Button::Center:
+            // Center opens/resumes selected book
+            if (view_.selectedBookIndex == 0 && view_.hasBook) {
+              openSelectedBook(core);
+            } else if (view_.selectedBookIndex > 0 && view_.selectedBookIndex <= view_.recentBookCount) {
+              // Open a recent book
+              const char* path = view_.getSelectedPath();
+              utf8SafeCopy(core.buf.path, path, sizeof(core.buf.path));
+              openSelectedBook(core);
+            }
+            break;
+
+          case Button::Left:
+            // Open the file browser.
+            return StateTransition::to(StateId::FileList);
+
+          case Button::Right:
+            // Open settings / menu.
+            return StateTransition::to(StateId::Settings);
+
+          case Button::Up:
+            // Previous book in carousel
+            if (view_.recentBookCount > 0) {
+              view_.selectPrevBook();
+              updateSelectedBook(core);
+            }
+            break;
+
+          case Button::Down:
+            // Next book in carousel
+            if (view_.recentBookCount > 0) {
+              view_.selectNextBook();
+              updateSelectedBook(core);
+            }
+            break;
+
+          case Button::Power:
+            break;
+        }
+        break;
+
+      case EventType::ButtonLongPress:
+        if (e.button == Button::Power) {
+          return StateTransition::to(StateId::Sleep);
+        }
+        break;
+
+      default:
+        break;
+    }
+
+    // Check if a book open was requested (sets path on core.buf.path)
+    if (pendingOpen_) {
+      pendingOpen_ = false;
+      return StateTransition::to(StateId::Reader);
+    }
+  }
+
+  return StateTransition::stay(StateId::Home);
+}
+
+void HomeState::drawBackground(Core& core) {
+  const char* themeName = core.settings.homeArtTheme;
+  Serial.printf("[HOME] drawBackground - theme setting: '%s'\n", themeName);
+
+  // Check if using default built-in PROGMEM art
+  if (strcmp(themeName, "default") == 0 || themeName[0] == '\0') {
+    Serial.println("[HOME] Using default PROGMEM theme");
+    uint8_t* fb = renderer_.getFrameBuffer();
+    if (fb) {
+      // Copy sumi-e art directly into framebuffer (native orientation, zero overhead)
+      memcpy_P(fb, SumiHomeBg, SUMI_HOME_BG_SIZE);
+    }
+  } else {
+    // Load theme from SD card
+    drawBackgroundFromSD(themeName);
+  }
+
+  // The sumi-e art + SD themes are authored for a light background. In dark
+  // mode the theme clears to black and renders white text, but the artwork
+  // itself comes through unchanged — which was leaving users with white
+  // text on a white-art background and nothing visible (user feedback:
+  // "the text on the book carousel and the progress bar render as white
+  // like dark mode but it is still a white background"). Invert the
+  // framebuffer after the art lands so the art flips to a dark style and
+  // the white text stays readable.
+  if (THEME.backgroundColor == 0x00) {
+    uint8_t* fb = renderer_.getFrameBuffer();
+    if (fb) {
+      // Runtime buffer size handles both X4 (48000) and X3 (52272).
+      const size_t sz = renderer_.getBufferSize();
+      for (size_t i = 0; i < sz; ++i) fb[i] = static_cast<uint8_t>(~fb[i]);
+    }
+  }
+}
+
+void HomeState::drawBackgroundFromSD(const char* themeName) {
+  char path[64];
+  snprintf(path, sizeof(path), "/config/themes/%s.bmp", themeName);
+  
+  FsFile file;
+  if (!SdMan.openFileForRead("THEME", path, file)) {
+    Serial.printf("[HOME] Theme not found: %s, using default\n", path);
+    // Fall back to default PROGMEM art
+    uint8_t* fb = renderer_.getFrameBuffer();
+    if (fb) {
+      memcpy_P(fb, SumiHomeBg, SUMI_HOME_BG_SIZE);
+    }
+    return;
+  }
+  
+  // Read BMP header to get pixel data offset
+  uint8_t header[62];
+  if (file.read(header, 62) != 62) {
+    Serial.printf("[HOME] Failed to read BMP header: %s\n", path);
+    file.close();
+    uint8_t* fb = renderer_.getFrameBuffer();
+    if (fb) {
+      memcpy_P(fb, SumiHomeBg, SUMI_HOME_BG_SIZE);
+    }
+    return;
+  }
+  
+  // Get pixel data offset from header (bytes 10-13, little endian)
+  uint32_t pixelOffset = header[10] | (header[11] << 8) | (header[12] << 16) | (header[13] << 24);
+  
+  // Get image dimensions from header (bytes 18-21 = width, 22-25 = height)
+  int32_t width = header[18] | (header[19] << 8) | (header[20] << 16) | (header[21] << 24);
+  int32_t height = header[22] | (header[23] << 8) | (header[24] << 16) | (header[25] << 24);
+  
+  // Check palette to determine if inversion is needed
+  // Palette starts at byte 54 for BITMAPINFOHEADER
+  // If palette[0] is black (0,0,0), the BMP uses standard convention
+  // Our framebuffer uses: 0=white, 1=black
+  // Standard BMP uses: bit 0=palette[0], bit 1=palette[1]
+  // If palette[0]=black, palette[1]=white: BMP bit matches FB bit, NO inversion needed
+  bool needsInvert = !(header[54] == 0 && header[55] == 0 && header[56] == 0);
+  
+  Serial.printf("[HOME] BMP: %dx%d, offset: %lu, invert: %s\n", 
+                width, height, pixelOffset, needsInvert ? "yes" : "no");
+  
+  // Verify dimensions - accept 480x800 portrait BMPs
+  if (width != 480 || height != 800) {
+    Serial.printf("[HOME] BMP dimensions mismatch, expected 480x800, using default\n");
+    file.close();
+    uint8_t* fb = renderer_.getFrameBuffer();
+    if (fb) {
+      memcpy_P(fb, SumiHomeBg, SUMI_HOME_BG_SIZE);
+    }
+    return;
+  }
+  
+  // Seek to pixel data
+  file.seek(pixelOffset);
+  
+  uint8_t* fb = renderer_.getFrameBuffer();
+  if (fb) {
+    // BMP is 480x800 portrait, framebuffer is 800x480 landscape
+    // Rotate 90° CW while loading: BMP(x,y) -> FB(799-y, x)
+    // BMP rows are stored bottom-to-top
+    constexpr int bmpRowBytes = 60;  // 480 pixels / 8
+    constexpr int fbRowBytes = 100;  // 800 pixels / 8
+    
+    uint8_t rowBuf[bmpRowBytes];
+    
+    // Read BMP from bottom to top (standard BMP order)
+    for (int bmpY = 0; bmpY < 800; bmpY++) {
+      if (file.read(rowBuf, bmpRowBytes) != bmpRowBytes) {
+        Serial.printf("[HOME] BMP read error at row %d\n", bmpY);
+        break;
+      }
+      
+      // This BMP row becomes a vertical column in the framebuffer
+      // BMP row bmpY (from bottom) -> FB column (799 - bmpY)
+      int fbX = 799 - bmpY;
+      int fbByteX = fbX / 8;
+      int fbBitX = 7 - (fbX % 8);  // MSB first in framebuffer
+      
+      // Each pixel in this BMP row goes to a different FB row
+      for (int bmpX = 0; bmpX < 480; bmpX++) {
+        int bmpByteX = bmpX / 8;
+        int bmpBitX = 7 - (bmpX % 8);  // MSB first in BMP
+        
+        // Get pixel from BMP row
+        uint8_t pixel = (rowBuf[bmpByteX] >> bmpBitX) & 1;
+        if (needsInvert) pixel = !pixel;
+
+        // Write to framebuffer - BMP x becomes FB y (mirrored).
+        //
+        // The rest of the UI reaches the panel through
+        // GfxRenderer::drawPixel(), whose Portrait mapping is
+        // (sx,sy) -> panel(col=sy, row=panelHeight-1-sx). This hand-rolled
+        // loader was instead writing image column bmpX straight to FB row
+        // bmpX, i.e. panel row = bmpX rather than (479 - bmpX). Worked back
+        // through the display mapping that lands image pixel (ix,iy) at
+        // screen (479-ix, iy) — a pure horizontal mirror. That's why custom
+        // /config/themes art (and the Sumi theme) showed up flipped
+        // left-for-right versus how it was authored, while UI text was fine.
+        // Mirroring bmpX here aligns the art with the same convention the UI
+        // uses, so it renders the way the artist drew it. (X4 path: FB is
+        // 800x480, 480 rows; bmpX spans 0..479.)
+        int fbY = 479 - bmpX;
+        uint8_t* fbByte = fb + fbY * fbRowBytes + fbByteX;
+        if (pixel) {
+          *fbByte |= (1 << fbBitX);
+        } else {
+          *fbByte &= ~(1 << fbBitX);
+        }
+      }
+    }
+  }
+  
+  file.close();
+  Serial.printf("[HOME] Loaded theme: %s\n", themeName);
+}
+
+void HomeState::render(Core& core) {
+  if (!view_.needsRender) {
+    return;
+  }
+
+  const Theme& theme = THEME;
+
+  // Always draw background first
+  drawBackground(core);
+
+  // Load cover from SD card every time (simple, always correct)
+  if (hasCoverImage_ && !coverLoadFailed_) {
+    renderCoverToCard();
+  }
+
+  // Resolve external font for title/author (may trigger SD load on first call)
+  view_.titleFontId = (theme.readerFontFamilySmall[0] != '\0')
+                          ? FONT_MANAGER.getFontId(theme.readerFontFamilySmall, theme.uiFontId)
+                          : theme.uiFontId;
+
+  // Render rest of UI (text boxes will draw on top of cover)
+  ui::render(renderer_, theme, view_);
+
+  renderer_.displayBuffer(EInkDisplay::HALF_REFRESH);
+  view_.needsRender = false;
+  core.display.markDirty();
+
+  // First-boot welcome overlay — show once when no .sumi folder exists yet
+  if (core.settings.isFirstBoot) {
+    core.settings.isFirstBoot = false;
+    delay(2000);  // Let home screen settle before overlaying
+
+    const int W = renderer_.getScreenWidth();   // 480
+    const int pad = 24;
+    const int boxX = pad;
+    const int boxW = W - 2 * pad;
+    const int boxY = 480;
+    const int boxH = 280;
+
+    // White box with double border
+    renderer_.fillRect(boxX, boxY, boxW, boxH, false);
+    renderer_.drawRect(boxX, boxY, boxW, boxH, true);
+    renderer_.drawRect(boxX + 1, boxY + 1, boxW - 2, boxH - 2, true);
+
+    const int textX = boxX + 20;
+    const int textW = boxW - 40;
+    const int lineH = renderer_.getLineHeight(theme.menuFontId) + 4;
+    int y = boxY + 24;
+
+    // Title
+    renderer_.drawCenteredText(theme.menuFontId, y, "Welcome to SUMI", theme.primaryTextBlack, EpdFontFamily::BOLD);
+    y += lineH + 12;
+
+    // Body text
+    const char* lines[] = {
+      "SUMI reads any EPUB, but files",
+      "optimized on sumi.page load faster,",
+      "look sharper, and use less memory.",
+      "",
+      "Open sumi.page in Chrome or Edge",
+      "with Bluetooth enabled to convert",
+      "and send files wirelessly.",
+    };
+    for (const char* line : lines) {
+      if (line[0] == '\0') {
+        y += lineH / 2;
+      } else {
+        renderer_.drawCenteredText(theme.smallFontId, y, line, theme.primaryTextBlack);
+        y += renderer_.getLineHeight(theme.smallFontId) + 3;
+      }
+    }
+
+    renderer_.displayBuffer(EInkDisplay::FAST_REFRESH);
+  }
+}
+
+void HomeState::renderCoverToCard() {
+  FsFile file;
+  if (!SdMan.openFileForRead("HOME", coverBmpPath_, file)) {
+    coverLoadFailed_ = true;
+    Serial.printf("[%lu] [HOME] Failed to open cover BMP: %s\n", millis(), coverBmpPath_.c_str());
+    return;
+  }
+
+  Bitmap bitmap(file);
+  if (bitmap.parseHeaders() != BmpReaderError::Ok) {
+    file.close();
+    coverLoadFailed_ = true;
+    Serial.printf("[%lu] [HOME] Failed to parse cover BMP: %s\n", millis(), coverBmpPath_.c_str());
+    return;
+  }
+
+  const auto card = ui::CardDimensions::calculate(renderer_.getScreenWidth(), renderer_.getScreenHeight());
+  const auto coverArea = card.getCoverArea();
+
+  // Compute scale (same logic as drawBitmap) to find actual drawn size
+  float scale = 1.0f;
+  if (bitmap.getWidth() > coverArea.width)
+    scale = (float)coverArea.width / (float)bitmap.getWidth();
+  if (bitmap.getHeight() > coverArea.height)
+    scale = std::min(scale, (float)coverArea.height / (float)bitmap.getHeight());
+
+  int drawnW = (int)(bitmap.getWidth() * scale);
+  int drawnH = (int)(bitmap.getHeight() * scale);
+
+  // Anchor to bottom-right of cover area
+  int drawX = coverArea.x + coverArea.width - drawnW;
+  int drawY = coverArea.y + coverArea.height - drawnH;
+
+  renderer_.drawBitmap(bitmap, drawX, drawY, coverArea.width, coverArea.height);
+  file.close();
+}
+
+
+}  // namespace sumi

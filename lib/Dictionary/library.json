@@ -1,0 +1,5 @@
+{
+  "name": "Dictionary",
+  "version": "1.0.0",
+  "description": "StarDict-compatible lookup for SUMI: multi-dict scanning, sparse offset cache, English stemmer, edit-distance suggestions, per-book history"
+}

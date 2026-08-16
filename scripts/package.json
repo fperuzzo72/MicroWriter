@@ -1,0 +1,15 @@
+{
+  "name": "sumi-tools",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Build tools for SUMI e-ink reader firmware",
+  "scripts": {
+    "convert-fonts": "node convert-fonts.mjs",
+    "convert-logo": "node convert-logo.mjs",
+    "create-sleep-screen": "node create-sleep-screen.mjs"
+  },
+  "dependencies": {
+    "opentype.js": "^1.3.4",
+    "sharp": "^0.33.0"
+  }
+}

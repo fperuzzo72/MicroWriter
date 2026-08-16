@@ -1,0 +1,66 @@
+#pragma once
+
+#include <EpdFontFamily.h>
+
+#include <functional>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include "blocks/TextBlock.h"
+
+class GfxRenderer;
+
+/**
+ * Callback type for checking if operation should abort.
+ * Returns true if caller should stop work and return early.
+ */
+using AbortCallback = std::function<bool()>;
+
+class ParsedText {
+  std::vector<std::string> words;
+  std::vector<EpdFontFamily::Style> wordStyles;
+  std::vector<uint8_t> wordDecorations;
+  TextBlock::BLOCK_STYLE style;
+  uint8_t indentLevel;
+  int16_t textIndentPx = 0;  // CSS text-indent: positive = first-line indent, negative = hanging indent
+  bool hyphenationEnabled;
+  bool useGreedyBreaking = false;  // Default to DP (minimum-raggedness) for better line breaking
+  bool isRtl = false;
+
+  std::vector<size_t> computeLineBreaks(int pageWidth, int spaceWidth, const std::vector<uint16_t>& wordWidths,
+                                        const AbortCallback& shouldAbort = nullptr) const;
+  std::vector<size_t> computeLineBreaksGreedy(int pageWidth, int spaceWidth, const std::vector<uint16_t>& wordWidths,
+                                              const AbortCallback& shouldAbort = nullptr) const;
+  std::vector<size_t> computeHyphenatedLineBreaks(const GfxRenderer& renderer, int fontId, int pageWidth,
+                                                  int spaceWidth, std::vector<uint16_t>& wordWidths,
+                                                  const AbortCallback& shouldAbort = nullptr);
+  bool hyphenateWordAtIndex(size_t wordIndex, int availableWidth, const GfxRenderer& renderer, int fontId,
+                            std::vector<uint16_t>& wordWidths, bool allowFallbackBreaks);
+  void extractLine(size_t breakIndex, int pageWidth, int spaceWidth, const std::vector<uint16_t>& wordWidths,
+                   const std::vector<size_t>& lineBreakIndices,
+                   const std::function<void(std::shared_ptr<TextBlock>)>& processLine);
+  std::vector<uint16_t> calculateWordWidths(const GfxRenderer& renderer, int fontId);
+
+ public:
+  explicit ParsedText(const TextBlock::BLOCK_STYLE style, const uint8_t indentLevel,
+                      const bool hyphenationEnabled = true, const bool useGreedy = false, const bool rtl = false,
+                      const int16_t cssTextIndent = 0)
+      : style(style),
+        indentLevel(indentLevel),
+        textIndentPx(cssTextIndent),
+        hyphenationEnabled(hyphenationEnabled),
+        useGreedyBreaking(useGreedy),
+        isRtl(rtl) {}
+  ~ParsedText() = default;
+
+  void addWord(std::string word, EpdFontFamily::Style fontStyle, uint8_t decorations = 0);
+  void setStyle(const TextBlock::BLOCK_STYLE style) { this->style = style; }
+  void setUseGreedyBreaking(const bool greedy) { useGreedyBreaking = greedy; }
+  TextBlock::BLOCK_STYLE getStyle() const { return style; }
+  size_t size() const { return words.size(); }
+  bool isEmpty() const { return words.empty(); }
+  bool layoutAndExtractLines(const GfxRenderer& renderer, int fontId, uint16_t viewportWidth,
+                             const std::function<void(std::shared_ptr<TextBlock>)>& processLine,
+                             bool includeLastLine = true, const AbortCallback& shouldAbort = nullptr);
+};

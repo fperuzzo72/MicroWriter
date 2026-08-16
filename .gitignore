@@ -1,0 +1,22 @@
+.pio
+.vscode/.browse.c_cpp.db*
+.vscode/c_cpp_properties.json
+.vscode/launch.json
+.vscode/ipch
+
+# CMake build dir for tools/reader-test
+build/
+
+# Host unit-test harness build output — regenerated from test/ sources on
+# every `cmake --build test/build`. Was accidentally tracked in the first
+# commit (with stale Visual Studio artifacts), so every Ninja build churns
+# dozens of files in `git status`.
+test/build/
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Windows Python Install Manager stray install
+Python/
+python_install_*.log

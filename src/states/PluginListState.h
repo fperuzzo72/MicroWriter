@@ -1,0 +1,103 @@
+#pragma once
+
+#include <GfxRenderer.h>
+
+#include "../config.h"
+
+#if FEATURE_PLUGINS
+
+#include "../plugins/PluginInterface.h"
+#include "../plugins/PluginRenderer.h"
+#include "PluginHostState.h"
+#include "State.h"
+
+namespace sumi {
+
+struct Settings;  // Forward declaration for visibility filtering
+
+// Registry entry for a plugin
+struct PluginEntry {
+  const char* name;
+  const char* category;  // "Games", "Productivity", "Tools"
+  PluginFactory factory;
+  const char* savePath;  // Path to save file (nullptr if no save support)
+};
+
+class PluginListState : public State {
+ public:
+  explicit PluginListState(GfxRenderer& renderer);
+  ~PluginListState() override = default;
+
+  void enter(Core& core) override;
+  void exit(Core& core) override;
+  StateTransition update(Core& core) override;
+  void render(Core& core) override;
+  StateId id() const override { return StateId::PluginList; }
+
+  // Plugin registry — populated at startup
+  static constexpr int MAX_PLUGINS = 24;
+  static int pluginCount;
+  static PluginEntry plugins[MAX_PLUGINS];
+
+  // Register a plugin (called from main.cpp)
+  static bool registerPlugin(const char* name, const char* category, PluginFactory factory, const char* savePath = nullptr);
+
+  // Scan /custom/*.lua and register each as a LuaPlugin
+  static void scanLuaPlugins(PluginRenderer& renderer);
+
+  // Get a reference to the host state for launching
+  void setHostState(PluginHostState* host) { hostState_ = host; }
+
+  // Storage for Lua plugin paths and names (static so factory functions
+  // can reference them).
+  //
+  // luaPaths_ width bumped from 64 → 96 in Batch 9: the formatted path
+  // is "/custom/" (8 chars) + filename (FAT LFN allows up to 255). With
+  // a 64-char buffer, filenames longer than 55 chars truncated silently
+  // and `LuaPlugin::loadScript` failed to open the file even though it
+  // appeared in the plugin list. 96 covers the common long-filename
+  // case (64-char filenames are realistic; 255 is an edge case the
+  // user can rename around). Audit #53.
+  static constexpr int MAX_LUA_PLUGINS = 8;
+  static char luaPaths_[MAX_LUA_PLUGINS][96];
+  static char luaNames_[MAX_LUA_PLUGINS][24];
+  static int luaPluginCount_;
+  static PluginRenderer* luaRenderer_;
+
+ private:
+  GfxRenderer& renderer_;
+  PluginHostState* hostState_ = nullptr;
+
+  int8_t selected_ = 0;
+  int8_t scrollOffset_ = 0;
+  bool needsRender_ = true;
+  bool goHome_ = false;
+  bool launchPlugin_ = false;
+
+  // Display list: interleaves category headers and plugin entries.
+  // A displayList_ entry with pluginIndex == -1 is a category header;
+  // its categoryName points to the category string.
+  struct DisplayEntry {
+    int8_t pluginIndex;        // -1 = category header
+    const char* categoryName;  // non-null for headers
+  };
+  DisplayEntry displayList_[MAX_PLUGINS + 8];  // plugins + up to 8 category headers
+  int8_t displayCount_ = 0;
+
+  // Legacy visible list (still needed for index mapping)
+  int8_t visiblePlugins_[MAX_PLUGINS];
+  int8_t visiblePluginCount_ = 0;
+  void buildVisibleList(const Settings& settings);
+
+  // Skip to next/prev selectable entry (skips category headers)
+  void moveSelection(int direction);
+
+  // How many items fit on screen
+  int visibleCount() const;
+
+  void drawList() const;
+};
+
+}  // namespace sumi
+
+#endif  // FEATURE_PLUGINS

@@ -1,0 +1,74 @@
+<!--
+  doorbell.html — site-side handler for docs/plugin_examples/doorbell.lua
+
+  Paste into sumi.page/bridge → Custom Handler → Save. The generic
+  bridge runtime exposes `bridge.publish(topic, data)`, `bridge.on(topic,
+  fn)`, and `bridge.connected` to every custom handler.
+-->
+<div class="doorbell-panel" style="font-family:system-ui,sans-serif;max-width:480px;padding:16px;border:1px solid #ddd;border-radius:8px;">
+  <h3 style="margin-top:0;">🔔 Doorbell</h3>
+  <div id="bell-status" style="color:#666;margin-bottom:8px;">Waiting for device…</div>
+  <ul id="bell-log" style="list-style:none;padding:0;margin:0;max-height:240px;overflow:auto;"></ul>
+  <button id="bell-clear" style="margin-top:12px;padding:4px 10px;">Clear</button>
+</div>
+
+<script>
+(() => {
+  const status = document.getElementById("bell-status");
+  const log    = document.getElementById("bell-log");
+  const clear  = document.getElementById("bell-clear");
+
+  // Short synthesized chime (WebAudio) — avoids shipping a base64 mp3.
+  function chime() {
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(880, ctx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(440, ctx.currentTime + 0.35);
+      gain.gain.setValueAtTime(0.25, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.4);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.45);
+    } catch (e) { /* ignore — user may not have gestured yet */ }
+  }
+
+  function ensureNotifyPermission() {
+    if (!("Notification" in window)) return;
+    if (Notification.permission === "default") {
+      Notification.requestPermission();
+    }
+  }
+  ensureNotifyPermission();
+
+  bridge.on("doorbell/hello", (d) => {
+    status.textContent = "Paired to " + (d && d.name ? d.name : "device") + ".";
+  });
+
+  bridge.on("doorbell/ring", (d) => {
+    const epoch = (d && d.at) ? d.at : (Date.now() / 1000);
+    const when  = new Date(epoch * 1000);
+    const label = when.toLocaleTimeString();
+    const who   = (d && d.name) ? d.name : "doorbell";
+
+    const li = document.createElement("li");
+    li.style.padding = "6px 0";
+    li.style.borderBottom = "1px solid #eee";
+    li.textContent = `🔔  ${label} — ${who}`;
+    log.insertBefore(li, log.firstChild);
+
+    chime();
+
+    if ("Notification" in window && Notification.permission === "granted") {
+      new Notification("Someone's at the door", {
+        body: `${who} at ${label}`,
+        silent: false,
+      });
+    }
+  });
+
+  clear.addEventListener("click", () => { log.innerHTML = ""; });
+})();
+</script>
