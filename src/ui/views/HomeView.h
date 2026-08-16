@@ -12,38 +12,29 @@
 namespace ui {
 
 // ============================================================================
-// HomeView - Main home screen with current book and direct action buttons
+// HomeView - CrossPoint-style home screen: last book read on top, a plain
+// menu list directly below it. No carousel, no decorative art background —
+// see docs/HOME_LAYOUT.md for why.
 // ============================================================================
 
-struct CardDimensions {
-  int x, y, width, height;
-
-  struct CoverArea {
-    int x, y, width, height;
-  };
-
-  static CardDimensions calculate(int screenWidth, int screenHeight) {
-    // Matched to sumi-e art template cover rectangle
-    const int w = 300;
-    const int h = 415;
-    const int x = (screenWidth - w) / 2;  // centered: (480-300)/2 = 90
-    constexpr int y = 128;
-    return {x, y, w, h};
-  }
-
-  CoverArea getCoverArea() const {
-    constexpr int padding = 4;
-    return {x + padding, y + padding, width - 2 * padding, height - 2 * padding};
-  }
+// Book block + menu list geometry, computed once from screen/theme metrics
+// and shared between ui::render() (draws the in-memory cover, if any) and
+// HomeState::renderCoverToCard() (draws an SD-loaded BMP cover on top of
+// it afterwards). Keeping this in one function instead of duplicating the
+// numbers in both places is what keeps those two draws lined up.
+struct BookBlockLayout {
+  int coverX, coverY, coverMaxW, coverMaxH;
+  int menuStartY;  // First menu row's y, i.e. where the block "ends"
 };
+
+BookBlockLayout calculateBookBlockLayout(const GfxRenderer& r, const Theme& t);
 
 struct HomeView {
   static constexpr int MAX_TITLE_LEN = 64;
   static constexpr int MAX_AUTHOR_LEN = 48;
   static constexpr int MAX_PATH_LEN = 128;
-  static constexpr int MAX_RECENT_BOOKS = 10;  // All recent books in carousel
 
-  // Current book info (the one shown large)
+  // Current book info
   char bookTitle[MAX_TITLE_LEN] = {0};
   char bookAuthor[MAX_AUTHOR_LEN] = {0};
   char bookPath[MAX_PATH_LEN] = {0};
@@ -74,24 +65,29 @@ struct HomeView {
   // UI state
   int8_t batteryPercent = 100;
   bool needsRender = true;
-  bool useArtBackground = false;  // When true, skip clearScreen/buttonBar (baked into art)
-  
-  // Library carousel state
-  static constexpr int MAX_THUMB_LEN = 80;
 
-  struct RecentBookEntry {
-    char title[MAX_TITLE_LEN];
-    char author[MAX_AUTHOR_LEN];
-    char path[MAX_PATH_LEN];
-    char thumbPath[MAX_THUMB_LEN];  // Persisted thumbnail path
-    uint16_t progress;
-    bool hasThumbnail;
+  // Menu list — a flat, arrow-navigable list of rows directly below the
+  // book block. "Continue reading" (when a book is open) is just row 0,
+  // same as CrossPoint's own CLASSIC home theme treats it — not a
+  // separate widget with its own input handling.
+  enum class MenuTarget : uint8_t {
+    ContinueReading,
+    Files,
+    Write,
+    Dictionary,
+    Games,
+    Settings,
   };
-  
-  RecentBookEntry recentBooks[MAX_RECENT_BOOKS];
-  int recentBookCount = 0;
-  int selectedBookIndex = 0;  // 0 = current book, 1+ = recent books
-  bool inLibraryMode = false;  // When true, show carousel at bottom
+
+  struct MenuEntry {
+    char label[24];
+    MenuTarget target;
+  };
+
+  static constexpr int MAX_MENU_ITEMS = 8;
+  MenuEntry menuItems[MAX_MENU_ITEMS];
+  int menuItemCount = 0;
+  int selection = 0;  // Index into menuItems
 
   void setBook(const char* title, const char* author, const char* path) {
     // UTF-8 safe: a CJK title/author that would be sliced mid-codepoint
@@ -132,58 +128,40 @@ struct HomeView {
       needsRender = true;
     }
   }
-  
-  void addRecentBook(const char* title, const char* author, const char* path,
-                     uint16_t progress, bool hasThumbnail,
-                     const char* thumbPath = nullptr) {
-    if (recentBookCount >= MAX_RECENT_BOOKS) return;
-    auto& entry = recentBooks[recentBookCount];
-    // UTF-8 safe: these are the carousel entries on the Home view.
-    utf8SafeCopy(entry.title, title, MAX_TITLE_LEN);
-    utf8SafeCopy(entry.author, author, MAX_AUTHOR_LEN);
-    utf8SafeCopy(entry.path, path, MAX_PATH_LEN);
-    if (thumbPath && thumbPath[0] != '\0') {
-      utf8SafeCopy(entry.thumbPath, thumbPath, MAX_THUMB_LEN);
-    } else {
-      entry.thumbPath[0] = '\0';
-    }
-    entry.progress = progress;
-    entry.hasThumbnail = hasThumbnail;
-    recentBookCount++;
+
+  void clearMenu() {
+    menuItemCount = 0;
+    selection = 0;
   }
-  
-  void clearRecentBooks() {
-    recentBookCount = 0;
-    selectedBookIndex = 0;
-    inLibraryMode = false;
+
+  bool addMenuItem(const char* label, MenuTarget target) {
+    if (menuItemCount >= MAX_MENU_ITEMS) return false;
+    utf8SafeCopy(menuItems[menuItemCount].label, label, sizeof(menuItems[menuItemCount].label));
+    menuItems[menuItemCount].target = target;
+    menuItemCount++;
+    return true;
   }
-  
-  void selectNextBook() {
-    if (recentBookCount > 0) {
-      selectedBookIndex = (selectedBookIndex + 1) % (recentBookCount + 1);
-      needsRender = true;
-    }
+
+  void moveSelectionUp() {
+    if (menuItemCount == 0) return;
+    selection = (selection == 0) ? menuItemCount - 1 : selection - 1;
+    needsRender = true;
   }
-  
-  void selectPrevBook() {
-    if (recentBookCount > 0) {
-      selectedBookIndex = (selectedBookIndex + recentBookCount) % (recentBookCount + 1);
-      needsRender = true;
-    }
+
+  void moveSelectionDown() {
+    if (menuItemCount == 0) return;
+    selection = (selection + 1) % menuItemCount;
+    needsRender = true;
   }
-  
-  const char* getSelectedPath() const {
-    if (selectedBookIndex == 0) {
-      return bookPath;
-    } else if (selectedBookIndex - 1 < recentBookCount) {
-      return recentBooks[selectedBookIndex - 1].path;
-    }
-    return bookPath;
+
+  const MenuEntry* selectedEntry() const {
+    if (selection < 0 || selection >= menuItemCount) return nullptr;
+    return &menuItems[selection];
   }
 
   void clear() {
     clearBook();
-    clearRecentBooks();
+    clearMenu();
     batteryPercent = 100;
   }
 };

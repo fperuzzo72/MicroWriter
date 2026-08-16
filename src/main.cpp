@@ -913,6 +913,7 @@ void initSystem() {
   // Register plugin states
   pluginListState.setHostState(&pluginHostState);
   fileListState.setHostState(&pluginHostState);
+  homeState.setHostState(&pluginHostState);
   stateMachine.registerState(&pluginListState);
   stateMachine.registerState(&pluginHostState);
   heapCheckpoint("initSystem.preRegisterPlugins");

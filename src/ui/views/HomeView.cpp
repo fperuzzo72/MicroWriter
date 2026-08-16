@@ -8,12 +8,25 @@
 
 namespace ui {
 
+BookBlockLayout calculateBookBlockLayout(const GfxRenderer& r, const Theme& t) {
+  const int headerBottom = 8 + r.getLineHeight(t.uiFontId) + 10;  // brand/battery row + gap
+  constexpr int coverMaxW = 100;
+  constexpr int coverMaxH = 150;
+  const int coverX = t.screenMarginSide + 10;
+  const int coverY = headerBottom + 8;
+
+  // Reserve the full cover height for the block regardless of whether the
+  // wrapped title+author actually needs that much — simpler than measuring
+  // wrapped-text height, and 150px comfortably fits a 2-line title next to
+  // the cover at UI font sizes.
+  const int progressY = coverY + coverMaxH + 8;
+  const int progressBottom = progressY + 16 + r.getLineHeight(t.smallFontId) + 5;
+
+  return {coverX, coverY, coverMaxW, coverMaxH, progressBottom + 10};
+}
+
 void render(const GfxRenderer& r, const Theme& t, const HomeView& v) {
-  // Art background: HomeState draws sumi-e art directly to framebuffer
-  // No art: clear screen only if no cover (HomeState handles clear when cover present)
-  if (!v.useArtBackground && !v.hasCoverBmp) {
-    r.clearScreen(t.backgroundColor);
-  }
+  r.clearScreen(t.backgroundColor);
 
   const int pageWidth = r.getScreenWidth();
   const int pageHeight = r.getScreenHeight();
@@ -24,164 +37,61 @@ void render(const GfxRenderer& r, const Theme& t, const HomeView& v) {
   // Battery indicator - top right
   battery(r, t, pageWidth - 80, 10, v.batteryPercent);
 
-  // Book card dimensions (matched to art template)
-  const auto card = CardDimensions::calculate(pageWidth, pageHeight);
-  const int cardX = card.x;
-  const int cardY = card.y;
-  const int cardWidth = card.width;
-  const int cardHeight = card.height;
-
-  const bool hasCover = v.coverData != nullptr || v.hasCoverBmp;
-
-  // Resolve font for title/author/buttons
+  const auto layout = calculateBookBlockLayout(r, t);
   const int titleFontId = (v.hasBook && v.titleFontId >= 0) ? v.titleFontId : t.uiFontId;
-  const int titleLineHeight = r.getLineHeight(titleFontId);
 
-  // Layout below cover (matched to art template):
-  //   y=543..546: cover bottom border (in art)
-  //   y=548..648: info area (title + author) - 100px
-  //   y=648:      separator line (in art)
-  //   y=664+:     progress bar area
-  const int infoTopY = cardY + cardHeight + 4;   // ~548
-  const int infoBottomY = infoTopY + 100;        // ~648
-
-  // === COVER AREA ===
+  // === BOOK BLOCK (cover + title/author beside it, matches CrossPoint's
+  // "last book read on top" layout — see docs/HOME_LAYOUT.md) ===
   if (v.hasBook) {
-    const auto coverArea = card.getCoverArea();
+    const bool hasCover = v.coverData != nullptr || v.hasCoverBmp;
     if (v.coverData != nullptr && v.coverWidth > 0 && v.coverHeight > 0) {
-      const auto rect = CoverHelpers::calculateCenteredRect(v.coverWidth, v.coverHeight, coverArea.x, coverArea.y,
-                                                            coverArea.width, coverArea.height);
+      const auto rect = CoverHelpers::calculateCenteredRect(v.coverWidth, v.coverHeight, layout.coverX, layout.coverY,
+                                                            layout.coverMaxW, layout.coverMaxH);
       r.drawImage(v.coverData, rect.x, rect.y, v.coverWidth, v.coverHeight);
+    } else if (!hasCover) {
+      bookPlaceholder(r, t, layout.coverX, layout.coverY, layout.coverMaxW, layout.coverMaxH);
     }
-    if (!hasCover) {
-      bookPlaceholder(r, t, coverArea.x, coverArea.y, coverArea.width, coverArea.height);
-    }
-  } else {
-    // No book - show hint in cover area
-    if (!v.useArtBackground) {
-      // Hand-drawn sketchy cover frame
-      r.drawRect(cardX, cardY, cardWidth, cardHeight, t.primaryTextBlack);
-      r.drawRect(cardX + 1, cardY + 1, cardWidth - 2, cardHeight - 2, t.primaryTextBlack);
-    }
-    const int lineHeight = r.getLineHeight(t.uiFontId);
-    const int centerY = cardY + cardHeight / 2;
-    const char* noBookText = _tr(HOME_NO_BOOK_OPEN);
-    const int nbw = r.getTextWidth(t.uiFontId, noBookText);
-    r.drawText(t.uiFontId, cardX + (cardWidth - nbw) / 2, centerY - lineHeight, noBookText, t.primaryTextBlack);
-    const char* hintText = _tr(HOME_PRESS_FILES);
-    const int hw = r.getTextWidth(t.uiFontId, hintText);
-    r.drawText(t.uiFontId, cardX + (cardWidth - hw) / 2, centerY + lineHeight / 2, hintText, t.secondaryTextBlack);
-  }
+    // hasCoverBmp: HomeState draws the SD-loaded cover on top after this
+    // call returns, at the same coverX/coverY/coverMaxW/coverMaxH rect.
 
-  // === BOOK INFO (title + author, centered in info area) ===
-  if (v.hasBook) {
-    // Top separator line - hand-drawn sketchy style (only when no art)
-    if (!v.useArtBackground) {
-      r.drawLine(cardX, infoTopY, cardX + cardWidth - 2, infoTopY, t.primaryTextBlack);
-      r.drawLine(cardX + 1, infoTopY + 1, cardX + cardWidth, infoTopY + 1, t.primaryTextBlack);
-      r.drawPixel(cardX + cardWidth - 1, infoTopY - 1, t.primaryTextBlack);
-    }
-
-    constexpr int textPad = 6;
-    int textY = infoTopY + textPad;
-    const int maxTitleLines = std::max(1, (infoBottomY - textY - titleLineHeight) / titleLineHeight);
-    const auto titleLines =
-        r.wrapTextWithHyphenation(titleFontId, v.bookTitle, cardWidth - 10, std::min(3, maxTitleLines));
+    const int textX = layout.coverX + layout.coverMaxW + 15;
+    const int maxTextW = pageWidth - textX - t.screenMarginSide - 10;
+    const int titleLineHeight = r.getLineHeight(titleFontId);
+    int textY = layout.coverY + 4;
+    const auto titleLines = r.wrapTextWithHyphenation(titleFontId, v.bookTitle, maxTextW, 3, EpdFontFamily::BOLD);
     for (const auto& line : titleLines) {
-      const int lw = r.getTextWidth(titleFontId, line.c_str());
-      r.drawText(titleFontId, cardX + (cardWidth - lw) / 2, textY, line.c_str(), t.primaryTextBlack);
+      r.drawText(titleFontId, textX, textY, line.c_str(), t.primaryTextBlack, EpdFontFamily::BOLD);
       textY += titleLineHeight;
     }
-
     if (v.bookAuthor[0] != '\0') {
-      textY += titleLineHeight / 6;
-      const auto trunc = r.truncatedText(titleFontId, v.bookAuthor, cardWidth - 10);
-      const int aw = r.getTextWidth(titleFontId, trunc.c_str());
-      r.drawText(titleFontId, cardX + (cardWidth - aw) / 2, textY, trunc.c_str(), t.secondaryTextBlack);
+      textY += titleLineHeight / 4;
+      const auto trunc = r.truncatedText(titleFontId, v.bookAuthor, maxTextW);
+      r.drawText(titleFontId, textX, textY, trunc.c_str(), t.secondaryTextBlack);
     }
 
-    // Bottom separator line - hand-drawn sketchy style (only when no art)
-    if (!v.useArtBackground) {
-      // Draw 2 slightly offset lines for a hand-drawn feel
-      r.drawLine(cardX + 2, infoBottomY, cardX + cardWidth - 3, infoBottomY, t.primaryTextBlack);
-      r.drawLine(cardX, infoBottomY + 1, cardX + cardWidth - 1, infoBottomY + 1, t.primaryTextBlack);
-      // Small ink blob at left end
-      r.drawPixel(cardX + 1, infoBottomY - 1, t.primaryTextBlack);
-      r.drawPixel(cardX - 1, infoBottomY + 2, t.primaryTextBlack);
+    if (v.bookProgress >= 0) {
+      const int barY = layout.coverY + layout.coverMaxH + 8;
+      progress(r, t, barY, v.bookProgress, 100);
     }
+  } else {
+    const int centerY = layout.coverY + layout.coverMaxH / 2;
+    const char* noBookText = _tr(HOME_NO_BOOK_OPEN);
+    const int nbw = r.getTextWidth(t.uiFontId, noBookText);
+    r.drawText(t.uiFontId, (pageWidth - nbw) / 2, centerY, noBookText, t.secondaryTextBlack);
   }
 
-  // === PROGRESS BAR (hand-drawn style, replaces old button area) ===
-  if (v.hasBook && v.bookProgress >= 0) {
-    const int barY = infoBottomY + 16;
-    constexpr int barH = 14;
-    constexpr int barPad = 20;  // Inset from card edges
-    const int barX = cardX + barPad;
-    const int barW = cardWidth - 2 * barPad;
+  r.drawLine(t.screenMarginSide, layout.menuStartY - 8, pageWidth - t.screenMarginSide, layout.menuStartY - 8,
+             t.primaryTextBlack);
 
-    // Hand-drawn border: double-line for thick sketchy feel
-    r.drawRect(barX, barY, barW, barH, t.primaryTextBlack);
-    r.drawRect(barX + 1, barY + 1, barW - 2, barH - 2, t.primaryTextBlack);
-    // Corner ink blobs
-    r.drawPixel(barX - 1, barY - 1, t.primaryTextBlack);
-    r.drawPixel(barX + barW, barY - 1, t.primaryTextBlack);
-    r.drawPixel(barX - 1, barY + barH, t.primaryTextBlack);
-    r.drawPixel(barX + barW, barY + barH, t.primaryTextBlack);
-
-    // Fill portion (inside the double border)
-    const int fillMax = barW - 6;
-    int fillW = v.bookProgress * fillMax / 100;
-    if (fillW < 1 && v.bookProgress > 0) fillW = 1;
-    if (fillW > 0) {
-      r.fillRect(barX + 3, barY + 3, fillW, barH - 6, t.primaryTextBlack);
-    }
-
-    // Progress text below bar
-    const int textY = barY + barH + 6;
-    // Use translated format strings so "Chapter"/"Page"/"complete" follow
-    // the selected language. snprintf still formats the %d the same way.
-    char progressText[64];
-    if (v.bookTotalPages > 0) {
-      const char* fmt = v.isChapterBased ? _tr(HOME_CHAPTER_OF_FMT) : _tr(HOME_PAGE_OF_FMT);
-      snprintf(progressText, sizeof(progressText), fmt, v.bookCurrentPage, v.bookTotalPages);
-    } else {
-      snprintf(progressText, sizeof(progressText), _tr(HOME_PERCENT_COMPLETE_FMT), v.bookProgress);
-    }
-    const int ptw = r.getTextWidth(t.uiFontId, progressText);
-    r.drawText(t.uiFontId, cardX + (cardWidth - ptw) / 2, textY, progressText, t.secondaryTextBlack);
-  }
-
-  // === LIBRARY CAROUSEL (dots at bottom showing position) ===
-  if (v.recentBookCount > 0) {
-    const int carouselY = pageHeight - 50;
-
-    // Draw carousel dots showing position
-    const int totalDots = v.recentBookCount + 1;  // +1 for current book
-    constexpr int dotSpacing = 16;
-    constexpr int dotRadius = 4;
-    const int dotsWidth = (totalDots - 1) * dotSpacing;
-    const int dotsStartX = (pageWidth - dotsWidth) / 2;
-
-    for (int i = 0; i < totalDots; i++) {
-      const int dotX = dotsStartX + i * dotSpacing;
-      const bool isSelected = (i == v.selectedBookIndex);
-
-      if (isSelected) {
-        // Filled dot for selected
-        r.fillRect(dotX - dotRadius, carouselY - dotRadius, dotRadius * 2, dotRadius * 2, t.primaryTextBlack);
-      } else {
-        // Hollow dot for unselected
-        r.drawRect(dotX - dotRadius, carouselY - dotRadius, dotRadius * 2, dotRadius * 2, t.primaryTextBlack);
-      }
-    }
+  // === MENU LIST (arrow-navigable, directly below the book block) ===
+  const int rowH = t.menuItemHeight + t.itemSpacing;
+  int y = layout.menuStartY;
+  for (int i = 0; i < v.menuItemCount; i++) {
+    menuItem(r, t, y, v.menuItems[i].label, i == v.selection);
+    y += rowH;
   }
 
   // === BOTTOM BUTTON HINTS ===
-  // The left/right buttons on the Home screen are non-obvious without a hint
-  // (reported in user feedback: "Left Button is the File Button (With No
-  // visible indication whatsoever) / The Right Button is the Menu Button").
-  // Small arrows + labels at the very bottom of the screen give a passive
-  // but always-visible clue.
   {
     constexpr int hintMargin = 12;
     const int hintY = pageHeight - 18;

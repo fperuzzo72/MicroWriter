@@ -20,8 +20,9 @@
 #include "Battery.h"
 #include "FontManager.h"
 #include "MappedInputManager.h"
+#include "PluginHostState.h"
+#include "PluginListState.h"
 #include "ThemeManager.h"
-#include "../assets/sumi_home_bg.h"
 
 namespace sumi {
 
@@ -36,16 +37,10 @@ void HomeState::enter(Core& core) {
   Serial.println("[HOME] Entering");
   core_ = &core;  // Store for theme loading
 
-  // Enable sumi-e art background
-  view_.useArtBackground = true;
-
   // Load last book info if content is still open
   loadLastBook(core);
-  
-  // Load recent books for carousel
-  loadRecentBooks(core);
 
-  // Update battery
+  buildMenu();
   updateBattery();
 
   view_.needsRender = true;
@@ -54,6 +49,18 @@ void HomeState::enter(Core& core) {
 void HomeState::exit(Core& core) {
   Serial.println("[HOME] Exiting");
   view_.clear();
+}
+
+void HomeState::buildMenu() {
+  view_.clearMenu();
+  if (view_.hasBook) {
+    view_.addMenuItem("Continue reading", ui::HomeView::MenuTarget::ContinueReading);
+  }
+  view_.addMenuItem("Files", ui::HomeView::MenuTarget::Files);
+  view_.addMenuItem("Write", ui::HomeView::MenuTarget::Write);
+  view_.addMenuItem("Dictionary", ui::HomeView::MenuTarget::Dictionary);
+  view_.addMenuItem("Games", ui::HomeView::MenuTarget::Games);
+  view_.addMenuItem("Settings", ui::HomeView::MenuTarget::Settings);
 }
 
 void HomeState::loadLastBook(Core& core) {
@@ -179,95 +186,61 @@ void HomeState::updateBattery() {
   view_.setBattery(percent);
 }
 
-void HomeState::loadRecentBooks(Core& core) {
-  view_.clearRecentBooks();
-  
-  // Load all recent books (current book is shown separately as main card)
-  RecentBooks::Entry entries[RecentBooks::MAX_RECENT];
-  int count = RecentBooks::loadAll(core, entries, RecentBooks::MAX_RECENT);
-  
-  // Skip the first one if it matches current book (it's already shown as main)
-  int startIdx = 0;
-  if (count > 0 && view_.hasBook && strcmp(entries[0].path, view_.bookPath) == 0) {
-    startIdx = 1;
-  }
-  
-  // Add remaining recent books with persisted thumbnail paths
-  for (int i = startIdx; i < count && view_.recentBookCount < ui::HomeView::MAX_RECENT_BOOKS; i++) {
-    view_.addRecentBook(entries[i].title, entries[i].author, entries[i].path,
-                        entries[i].progress, entries[i].hasThumb(),
-                        entries[i].thumbPath);
-  }
-  
-  Serial.printf("[HOME] Loaded %d recent books (showing %d)\n", count, view_.recentBookCount);
-}
-
 void HomeState::openSelectedBook(Core& core) {
-  const char* path = view_.getSelectedPath();
-  if (path && path[0] != '\0') {
-    utf8SafeCopy(core.buf.path, path, sizeof(core.buf.path));
-    // Save lastBookPath for "continue reading" on next cold boot
-    utf8SafeCopy(core.settings.lastBookPath, core.buf.path, sizeof(core.settings.lastBookPath));
-    core.settings.transitionReturnTo = 0;  // ReturnTo::HOME
-    core.settings.saveToFile();
-    pendingOpen_ = true;
-  }
+  if (!view_.hasBook || view_.bookPath[0] == '\0') return;
+  utf8SafeCopy(core.buf.path, view_.bookPath, sizeof(core.buf.path));
+  // Save lastBookPath for "continue reading" on next cold boot
+  utf8SafeCopy(core.settings.lastBookPath, core.buf.path, sizeof(core.settings.lastBookPath));
+  core.settings.transitionReturnTo = 0;  // ReturnTo::HOME
+  core.settings.saveToFile();
+  pendingOpen_ = true;
 }
 
-void HomeState::updateSelectedBook(Core& core) {
-  // When user switches to a different book in carousel, update the card display
-  
-  // Reset cover state - will be reloaded for new selection
-  coverLoadFailed_ = false;
-  hasCoverImage_ = false;
-  coverBmpPath_.clear();
-  
-  if (view_.selectedBookIndex == 0) {
-    // Back to current book - reload from open content or settings
-    Serial.println("[HOME] Selected current book - reloading");
-    loadLastBook(core);
-  } else {
-    // Selected a recent book - copy its info. selectedBookIndex is
-    // bounded by selectNextBook/selectPrevBook's modular arithmetic
-    // (always [0, recentBookCount]), but a stale value e.g. after a
-    // recentBookCount shrink could leave recentIdx negative or past
-    // the array — explicit lower bound + range check on both ends.
-    int recentIdx = view_.selectedBookIndex - 1;
-    if (recentIdx >= 0 && recentIdx < view_.recentBookCount) {
-      const auto& recent = view_.recentBooks[recentIdx];
-      Serial.printf("[HOME] Selected recent book %d: %s\n", recentIdx, recent.title);
-      
-      view_.setBook(recent.title, recent.author, recent.path);
+StateTransition HomeState::launchMenuTarget(Core& core, ui::HomeView::MenuTarget target) {
+  using Target = ui::HomeView::MenuTarget;
 
-      // Compute cover path for this book
-      uint32_t hash = LibraryIndex::hashPath(recent.path);
-      currentBookHash_ = hash;  // Store for flash cache
-
-      // Get full progress info from LibraryIndex
-      LibraryIndex::Entry libEntry;
-      if (LibraryIndex::findByHash(core, hash, libEntry)) {
-        view_.bookCurrentPage = libEntry.currentPage;
-        view_.bookTotalPages = libEntry.totalPages;
-        view_.bookProgress = libEntry.progressPercent();
-        const char* dot = strrchr(recent.path, '.');
-        view_.isChapterBased = dot && (strcasecmp(dot, ".epub") == 0);
-      } else {
-        view_.bookProgress = recent.progress;
-        view_.bookCurrentPage = 0;
-        view_.bookTotalPages = 0;
-        view_.isChapterBased = true;
-      }
-
-      // Use persisted thumbnail path from RecentBooks
-      if (core.settings.showImages && recent.thumbPath[0] != '\0' && SdMan.exists(recent.thumbPath)) {
-        coverBmpPath_ = recent.thumbPath;
-        hasCoverImage_ = true;
+  // Look up a registered plugin by name and hand it to PluginHostState —
+  // same mechanism PluginListState uses when the user picks an entry from
+  // its own list, just skipping that intermediate screen for the handful
+  // of plugins that get a direct row on Home. Falls back to PluginList
+  // (the full picker) if the name isn't registered, so this never dead-ends.
+#if FEATURE_PLUGINS
+  auto launchPluginNamed = [this](const char* name) -> StateTransition {
+    if (hostState_) {
+      for (int i = 0; i < PluginListState::pluginCount; i++) {
+        if (strcmp(PluginListState::plugins[i].name, name) == 0) {
+          hostState_->setPluginFactory(PluginListState::plugins[i].factory);
+          return StateTransition::to(StateId::PluginHost);
+        }
       }
     }
+    return StateTransition::to(StateId::PluginList);
+  };
+#else
+  auto launchPluginNamed = [](const char*) -> StateTransition { return StateTransition::stay(StateId::Home); };
+#endif
+
+  switch (target) {
+    case Target::ContinueReading:
+      openSelectedBook(core);
+      break;
+    case Target::Files:
+      return StateTransition::to(StateId::FileList);
+    case Target::Settings:
+      return StateTransition::to(StateId::Settings);
+    case Target::Games:
+      // Several games are registered (Chess, Sudoku, SumiBoy, ...) — send
+      // the user to the picker rather than guessing which one they want.
+      return StateTransition::to(StateId::PluginList);
+    case Target::Write:
+      // TODO(MicroWriter): swap "Notes" for the ported MicroSlate plugin
+      // once it exists. Notes stays reachable from the Games/Apps picker
+      // either way — this only changes what "Write" on Home launches.
+      return launchPluginNamed("Notes");
+    case Target::Dictionary:
+      return launchPluginNamed("Dictionary");
   }
-  
-  view_.hasCoverBmp = hasCoverImage_;
-  view_.needsRender = true;
+  return StateTransition::stay(StateId::Home);
 }
 
 StateTransition HomeState::update(Core& core) {
@@ -277,21 +250,12 @@ StateTransition HomeState::update(Core& core) {
       case EventType::ButtonPress:
         switch (e.button) {
           case Button::Back:
-            // Back on Home is a no-op. Previous behavior resumed the
-            // current book, which duplicated Center and confused users
-            // ("Back button opens the book?!"). To reach the book just
-            // press Center like every other "open" in SUMI.
             break;
 
           case Button::Center:
-            // Center opens/resumes selected book
-            if (view_.selectedBookIndex == 0 && view_.hasBook) {
-              openSelectedBook(core);
-            } else if (view_.selectedBookIndex > 0 && view_.selectedBookIndex <= view_.recentBookCount) {
-              // Open a recent book
-              const char* path = view_.getSelectedPath();
-              utf8SafeCopy(core.buf.path, path, sizeof(core.buf.path));
-              openSelectedBook(core);
+            if (const auto* entry = view_.selectedEntry()) {
+              StateTransition t = launchMenuTarget(core, entry->target);
+              if (t.next != StateId::Home) return t;
             }
             break;
 
@@ -300,23 +264,15 @@ StateTransition HomeState::update(Core& core) {
             return StateTransition::to(StateId::FileList);
 
           case Button::Right:
-            // Open settings / menu.
+            // Open settings.
             return StateTransition::to(StateId::Settings);
 
           case Button::Up:
-            // Previous book in carousel
-            if (view_.recentBookCount > 0) {
-              view_.selectPrevBook();
-              updateSelectedBook(core);
-            }
+            view_.moveSelectionUp();
             break;
 
           case Button::Down:
-            // Next book in carousel
-            if (view_.recentBookCount > 0) {
-              view_.selectNextBook();
-              updateSelectedBook(core);
-            }
+            view_.moveSelectionDown();
             break;
 
           case Button::Power:
@@ -344,170 +300,12 @@ StateTransition HomeState::update(Core& core) {
   return StateTransition::stay(StateId::Home);
 }
 
-void HomeState::drawBackground(Core& core) {
-  const char* themeName = core.settings.homeArtTheme;
-  Serial.printf("[HOME] drawBackground - theme setting: '%s'\n", themeName);
-
-  // Check if using default built-in PROGMEM art
-  if (strcmp(themeName, "default") == 0 || themeName[0] == '\0') {
-    Serial.println("[HOME] Using default PROGMEM theme");
-    uint8_t* fb = renderer_.getFrameBuffer();
-    if (fb) {
-      // Copy sumi-e art directly into framebuffer (native orientation, zero overhead)
-      memcpy_P(fb, SumiHomeBg, SUMI_HOME_BG_SIZE);
-    }
-  } else {
-    // Load theme from SD card
-    drawBackgroundFromSD(themeName);
-  }
-
-  // The sumi-e art + SD themes are authored for a light background. In dark
-  // mode the theme clears to black and renders white text, but the artwork
-  // itself comes through unchanged — which was leaving users with white
-  // text on a white-art background and nothing visible (user feedback:
-  // "the text on the book carousel and the progress bar render as white
-  // like dark mode but it is still a white background"). Invert the
-  // framebuffer after the art lands so the art flips to a dark style and
-  // the white text stays readable.
-  if (THEME.backgroundColor == 0x00) {
-    uint8_t* fb = renderer_.getFrameBuffer();
-    if (fb) {
-      // Runtime buffer size handles both X4 (48000) and X3 (52272).
-      const size_t sz = renderer_.getBufferSize();
-      for (size_t i = 0; i < sz; ++i) fb[i] = static_cast<uint8_t>(~fb[i]);
-    }
-  }
-}
-
-void HomeState::drawBackgroundFromSD(const char* themeName) {
-  char path[64];
-  snprintf(path, sizeof(path), "/config/themes/%s.bmp", themeName);
-  
-  FsFile file;
-  if (!SdMan.openFileForRead("THEME", path, file)) {
-    Serial.printf("[HOME] Theme not found: %s, using default\n", path);
-    // Fall back to default PROGMEM art
-    uint8_t* fb = renderer_.getFrameBuffer();
-    if (fb) {
-      memcpy_P(fb, SumiHomeBg, SUMI_HOME_BG_SIZE);
-    }
-    return;
-  }
-  
-  // Read BMP header to get pixel data offset
-  uint8_t header[62];
-  if (file.read(header, 62) != 62) {
-    Serial.printf("[HOME] Failed to read BMP header: %s\n", path);
-    file.close();
-    uint8_t* fb = renderer_.getFrameBuffer();
-    if (fb) {
-      memcpy_P(fb, SumiHomeBg, SUMI_HOME_BG_SIZE);
-    }
-    return;
-  }
-  
-  // Get pixel data offset from header (bytes 10-13, little endian)
-  uint32_t pixelOffset = header[10] | (header[11] << 8) | (header[12] << 16) | (header[13] << 24);
-  
-  // Get image dimensions from header (bytes 18-21 = width, 22-25 = height)
-  int32_t width = header[18] | (header[19] << 8) | (header[20] << 16) | (header[21] << 24);
-  int32_t height = header[22] | (header[23] << 8) | (header[24] << 16) | (header[25] << 24);
-  
-  // Check palette to determine if inversion is needed
-  // Palette starts at byte 54 for BITMAPINFOHEADER
-  // If palette[0] is black (0,0,0), the BMP uses standard convention
-  // Our framebuffer uses: 0=white, 1=black
-  // Standard BMP uses: bit 0=palette[0], bit 1=palette[1]
-  // If palette[0]=black, palette[1]=white: BMP bit matches FB bit, NO inversion needed
-  bool needsInvert = !(header[54] == 0 && header[55] == 0 && header[56] == 0);
-  
-  Serial.printf("[HOME] BMP: %dx%d, offset: %lu, invert: %s\n", 
-                width, height, pixelOffset, needsInvert ? "yes" : "no");
-  
-  // Verify dimensions - accept 480x800 portrait BMPs
-  if (width != 480 || height != 800) {
-    Serial.printf("[HOME] BMP dimensions mismatch, expected 480x800, using default\n");
-    file.close();
-    uint8_t* fb = renderer_.getFrameBuffer();
-    if (fb) {
-      memcpy_P(fb, SumiHomeBg, SUMI_HOME_BG_SIZE);
-    }
-    return;
-  }
-  
-  // Seek to pixel data
-  file.seek(pixelOffset);
-  
-  uint8_t* fb = renderer_.getFrameBuffer();
-  if (fb) {
-    // BMP is 480x800 portrait, framebuffer is 800x480 landscape
-    // Rotate 90° CW while loading: BMP(x,y) -> FB(799-y, x)
-    // BMP rows are stored bottom-to-top
-    constexpr int bmpRowBytes = 60;  // 480 pixels / 8
-    constexpr int fbRowBytes = 100;  // 800 pixels / 8
-    
-    uint8_t rowBuf[bmpRowBytes];
-    
-    // Read BMP from bottom to top (standard BMP order)
-    for (int bmpY = 0; bmpY < 800; bmpY++) {
-      if (file.read(rowBuf, bmpRowBytes) != bmpRowBytes) {
-        Serial.printf("[HOME] BMP read error at row %d\n", bmpY);
-        break;
-      }
-      
-      // This BMP row becomes a vertical column in the framebuffer
-      // BMP row bmpY (from bottom) -> FB column (799 - bmpY)
-      int fbX = 799 - bmpY;
-      int fbByteX = fbX / 8;
-      int fbBitX = 7 - (fbX % 8);  // MSB first in framebuffer
-      
-      // Each pixel in this BMP row goes to a different FB row
-      for (int bmpX = 0; bmpX < 480; bmpX++) {
-        int bmpByteX = bmpX / 8;
-        int bmpBitX = 7 - (bmpX % 8);  // MSB first in BMP
-        
-        // Get pixel from BMP row
-        uint8_t pixel = (rowBuf[bmpByteX] >> bmpBitX) & 1;
-        if (needsInvert) pixel = !pixel;
-
-        // Write to framebuffer - BMP x becomes FB y (mirrored).
-        //
-        // The rest of the UI reaches the panel through
-        // GfxRenderer::drawPixel(), whose Portrait mapping is
-        // (sx,sy) -> panel(col=sy, row=panelHeight-1-sx). This hand-rolled
-        // loader was instead writing image column bmpX straight to FB row
-        // bmpX, i.e. panel row = bmpX rather than (479 - bmpX). Worked back
-        // through the display mapping that lands image pixel (ix,iy) at
-        // screen (479-ix, iy) — a pure horizontal mirror. That's why custom
-        // /config/themes art (and the Sumi theme) showed up flipped
-        // left-for-right versus how it was authored, while UI text was fine.
-        // Mirroring bmpX here aligns the art with the same convention the UI
-        // uses, so it renders the way the artist drew it. (X4 path: FB is
-        // 800x480, 480 rows; bmpX spans 0..479.)
-        int fbY = 479 - bmpX;
-        uint8_t* fbByte = fb + fbY * fbRowBytes + fbByteX;
-        if (pixel) {
-          *fbByte |= (1 << fbBitX);
-        } else {
-          *fbByte &= ~(1 << fbBitX);
-        }
-      }
-    }
-  }
-  
-  file.close();
-  Serial.printf("[HOME] Loaded theme: %s\n", themeName);
-}
-
 void HomeState::render(Core& core) {
   if (!view_.needsRender) {
     return;
   }
 
   const Theme& theme = THEME;
-
-  // Always draw background first
-  drawBackground(core);
 
   // Load cover from SD card every time (simple, always correct)
   if (hasCoverImage_ && !coverLoadFailed_) {
@@ -591,24 +389,23 @@ void HomeState::renderCoverToCard() {
     return;
   }
 
-  const auto card = ui::CardDimensions::calculate(renderer_.getScreenWidth(), renderer_.getScreenHeight());
-  const auto coverArea = card.getCoverArea();
+  const auto layout = ui::calculateBookBlockLayout(renderer_, THEME);
 
   // Compute scale (same logic as drawBitmap) to find actual drawn size
   float scale = 1.0f;
-  if (bitmap.getWidth() > coverArea.width)
-    scale = (float)coverArea.width / (float)bitmap.getWidth();
-  if (bitmap.getHeight() > coverArea.height)
-    scale = std::min(scale, (float)coverArea.height / (float)bitmap.getHeight());
+  if (bitmap.getWidth() > layout.coverMaxW)
+    scale = (float)layout.coverMaxW / (float)bitmap.getWidth();
+  if (bitmap.getHeight() > layout.coverMaxH)
+    scale = std::min(scale, (float)layout.coverMaxH / (float)bitmap.getHeight());
 
   int drawnW = (int)(bitmap.getWidth() * scale);
   int drawnH = (int)(bitmap.getHeight() * scale);
 
-  // Anchor to bottom-right of cover area
-  int drawX = coverArea.x + coverArea.width - drawnW;
-  int drawY = coverArea.y + coverArea.height - drawnH;
+  // Center within the cover area
+  int drawX = layout.coverX + (layout.coverMaxW - drawnW) / 2;
+  int drawY = layout.coverY + (layout.coverMaxH - drawnH) / 2;
 
-  renderer_.drawBitmap(bitmap, drawX, drawY, coverArea.width, coverArea.height);
+  renderer_.drawBitmap(bitmap, drawX, drawY, layout.coverMaxW, layout.coverMaxH);
   file.close();
 }
 
