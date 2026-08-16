@@ -33,6 +33,7 @@
 #include "UiFontSelection.h"
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
+#include "ble/BleKeyboard.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "util/BootRecovery.h"
@@ -360,6 +361,10 @@ void setup() {
   // Stamp all SdFat creates/syncs with RTC time when available, else last Sync Day.
   TimeUtils::registerSdFatDateTimeCallback();
 
+  // BLE keyboard host — engine only for now (no Settings UI yet). Reads its
+  // paired-device backup from SD, so must come after Storage.begin().
+  bleSetup();
+
   HalSystem::checkPanic();
   BootRecovery::initialize();
 
@@ -548,6 +553,20 @@ void loop() {
 
   gpio.update();
   halTiltSensor.update(SETTINGS.tiltPageTurn, SETTINGS.orientation, activityManager.isReaderActivity());
+
+  bleLoop();
+#ifdef ENABLE_SERIAL_LOG
+  // Phase 1 verification only: no Settings UI or input routing exists yet
+  // for the BLE keyboard, so just prove press/release events arrive.
+  // TODO(MicroWriter): remove once real input routing consumes this queue.
+  {
+    BleKeyEvent bleEvt;
+    while (popBleKeyEvent(bleEvt)) {
+      LOG_INF("BLE", "key=0x%02X mod=0x%02X %s", bleEvt.keyCode, bleEvt.modifiers,
+              bleEvt.pressed ? "DOWN" : "UP");
+    }
+  }
+#endif
 
   renderer.setFadingFix(SETTINGS.fadingFix);
   renderer.setDarkMode(SETTINGS.darkMode);
