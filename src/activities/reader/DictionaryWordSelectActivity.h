@@ -80,7 +80,6 @@ class DictionaryWordSelectActivity final : public Activity {
   void mergeHyphenatedWords();
   void moveRow(int delta);
   void moveWord(int delta);
-  void lookupSelectedWord();
   void confirmHighlightSelection();
   std::string buildSelectedText(int from, int to) const;
   int selectedWordIndex() const;

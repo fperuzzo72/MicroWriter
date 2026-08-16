@@ -22,7 +22,6 @@
 #include "BookmarksActivity.h"
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
-#include "DictionaryHistoryActivity.h"
 #include "DictionaryWordSelectActivity.h"
 #include "EpubReaderChapterSelectionActivity.h"
 #include "EpubReaderFootnotesActivity.h"
@@ -39,7 +38,6 @@
 #include "ReadingStatsStore.h"
 #include "RecentBooksStore.h"
 #include "SdCardFontGlobals.h"
-#include "activities/apps/DictionaryActivity.h"
 #include "activities/apps/ReadingStatsDetailActivity.h"
 #include "activities/util/ConfirmationActivity.h"
 #include "components/UITheme.h"
@@ -968,54 +966,6 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
                                  const auto& footnoteResult = std::get<FootnoteResult>(result.data);
                                  navigateToHref(footnoteResult.href, true);
                                }
-                               requestUpdate();
-                             });
-      break;
-    }
-    case EpubReaderMenuActivity::MenuAction::LOOK_UP_WORD: {
-      int overlayMarginLeft = 0;
-      int overlayMarginTop = 0;
-      auto page = loadCurrentPageForOverlay(overlayMarginLeft, overlayMarginTop);
-      if (!page) {
-        requestUpdate();
-        break;
-      }
-      READING_STATS.noteActivity();
-      startActivityForResult(
-          std::make_unique<DictionaryWordSelectActivity>(renderer, mappedInput, page, SETTINGS.getReaderFontId(),
-                                                         overlayMarginLeft, overlayMarginTop),
-          [this](const ActivityResult&) {
-            READING_STATS.resumeSession();
-            ReaderUtils::requestReaderUiTransitionRefresh(renderer);
-            requestUpdate();
-          });
-      break;
-    }
-    case EpubReaderMenuActivity::MenuAction::LOOKUP_HISTORY: {
-      int overlayMarginLeft = 0;
-      int overlayMarginTop = 0;
-      auto page = loadCurrentPageForOverlay(overlayMarginLeft, overlayMarginTop);
-      if (!page) {
-        requestUpdate();
-        break;
-      }
-      READING_STATS.noteActivity();
-      startActivityForResult(
-          std::make_unique<DictionaryHistoryActivity>(renderer, mappedInput, page, SETTINGS.getReaderFontId(),
-                                                      overlayMarginLeft, overlayMarginTop),
-          [this](const ActivityResult&) {
-            READING_STATS.resumeSession();
-            ReaderUtils::requestReaderUiTransitionRefresh(renderer);
-            requestUpdate();
-          });
-      break;
-    }
-    case EpubReaderMenuActivity::MenuAction::DICTIONARY: {
-      READING_STATS.noteActivity();
-      startActivityForResult(std::make_unique<DictionaryActivity>(renderer, mappedInput),
-                             [this](const ActivityResult&) {
-                               READING_STATS.resumeSession();
-                               ReaderUtils::requestReaderUiTransitionRefresh(renderer);
                                requestUpdate();
                              });
       break;
