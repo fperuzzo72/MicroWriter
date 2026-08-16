@@ -1,7 +1,7 @@
 /**
  * Xtc.h
  *
- * XTC ebook format support (format by CrossPoint Reader)
+ * Main XTC ebook class for CrossPoint Reader
  * Provides EPUB-like interface for XTC file handling
  */
 
@@ -25,6 +25,7 @@ class Xtc {
   std::string cachePath;
   std::unique_ptr<xtc::XtcParser> parser;
   bool loaded;
+  bool generateThumbBmpToPath(int width, int height, const std::string& thumbPath) const;
 
  public:
   explicit Xtc(std::string filepath, const std::string& cacheDir) : filepath(std::move(filepath)), loaded(false) {
@@ -56,12 +57,19 @@ class Xtc {
 
   // Metadata
   std::string getTitle() const;
+  std::string getAuthor() const;
   bool hasChapters() const;
-  const std::vector<xtc::ChapterInfo>& getChapters() const;
+  const std::vector<xtc::ChapterInfo>& getChapters();
 
   // Cover image support (for sleep screen)
   std::string getCoverBmpPath() const;
   bool generateCoverBmp() const;
+  // Thumbnail support (for Continue Reading card)
+  std::string getThumbBmpPath() const;
+  std::string getThumbBmpPath(int height) const;
+  std::string getThumbBmpPath(int width, int height) const;
+  bool generateThumbBmp(int height) const;
+  bool generateThumbBmp(int width, int height) const;
 
   // Page access
   uint32_t getPageCount() const;

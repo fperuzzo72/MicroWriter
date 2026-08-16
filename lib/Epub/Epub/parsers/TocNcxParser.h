@@ -4,9 +4,6 @@
 
 #include <string>
 
-constexpr int MAX_NCX_DEPTH = 100;
-constexpr size_t MAX_LABEL_LENGTH = 512;
-
 class BookMetadataCache;
 
 class TocNcxParser final : public Print {

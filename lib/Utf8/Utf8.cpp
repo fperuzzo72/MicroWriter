@@ -1,5 +1,73 @@
 #include "Utf8.h"
 
+#include "Utf8ComposeTable.h"
+
+namespace {
+// Look up the canonical composition of (base + combining mark), or 0 if none.
+uint32_t utf8ComposePair(const uint32_t base, const uint32_t mark) {
+  if (base > 0xFFFF || mark > 0xFFFF) return 0;
+  int lo = 0;
+  int hi = kUtf8ComposeTableSize - 1;
+  while (lo <= hi) {
+    const int mid = (lo + hi) / 2;
+    const Utf8ComposeEntry& e = kUtf8ComposeTable[mid];
+    if (e.base < base || (e.base == base && e.mark < mark)) {
+      lo = mid + 1;
+    } else if (e.base > base || (e.base == base && e.mark > mark)) {
+      hi = mid - 1;
+    } else {
+      return e.composed;
+    }
+  }
+  return 0;
+}
+}  // namespace
+
+std::string utf8ComposeNfc(const std::string& in) {
+  // Fast path: NFC composition can only change text that contains a combining
+  // diacritical mark U+0300-036F (UTF-8 lead byte 0xCC or 0xCD). Plain ASCII and
+  // already-precomposed (NFC) text -- the vast majority of words -- have none, so
+  // return them untouched without walking codepoints or allocating. A 0xCD that is
+  // actually a non-combining codepoint just falls through to the full pass below.
+  bool maybeHasMarks = false;
+  for (const unsigned char c : in) {
+    if (c == 0xCC || c == 0xCD) {
+      maybeHasMarks = true;
+      break;
+    }
+  }
+  if (!maybeHasMarks) return in;
+
+  std::string out;
+  out.reserve(in.size());
+  const unsigned char* p = reinterpret_cast<const unsigned char*>(in.c_str());
+  uint32_t base = 0;
+  bool haveBase = false;
+  while (*p) {
+    const uint32_t cp = utf8NextCodepoint(&p);
+    if (cp == 0) break;
+    if (utf8IsCombiningMark(cp)) {
+      const uint32_t composed = haveBase ? utf8ComposePair(base, cp) : 0;
+      if (composed) {
+        base = composed;  // keep accumulating further marks onto the composed char
+        continue;
+      }
+      // No composition: flush the pending base, then emit the mark unchanged.
+      if (haveBase) {
+        utf8AppendCodepoint(base, out);
+        haveBase = false;
+      }
+      utf8AppendCodepoint(cp, out);
+    } else {
+      if (haveBase) utf8AppendCodepoint(base, out);
+      base = cp;
+      haveBase = true;
+    }
+  }
+  if (haveBase) utf8AppendCodepoint(base, out);
+  return out;
+}
+
 int utf8CodepointLen(const unsigned char c) {
   if (c < 0x80) return 1;          // 0xxxxxxx
   if ((c >> 5) == 0x6) return 2;   // 110xxxxx
@@ -13,12 +81,28 @@ uint32_t utf8NextCodepoint(const unsigned char** string) {
     return 0;
   }
 
-  const int bytes = utf8CodepointLen(**string);
+  const unsigned char lead = **string;
+  const int bytes = utf8CodepointLen(lead);
   const uint8_t* chr = *string;
-  *string += bytes;
+
+  // Invalid lead byte (stray continuation byte 0x80-0xBF, or 0xFE/0xFF)
+  if (bytes == 1 && lead >= 0x80) {
+    (*string)++;
+    return REPLACEMENT_GLYPH;
+  }
 
   if (bytes == 1) {
+    (*string)++;
     return chr[0];
+  }
+
+  // Validate continuation bytes before consuming them
+  for (int i = 1; i < bytes; i++) {
+    if ((chr[i] & 0xC0) != 0x80) {
+      // Missing or invalid continuation byte — skip all bytes consumed so far
+      *string += i;
+      return REPLACEMENT_GLYPH;
+    }
   }
 
   uint32_t cp = chr[0] & ((1 << (7 - bytes)) - 1);  // mask header bits
@@ -27,14 +111,60 @@ uint32_t utf8NextCodepoint(const unsigned char** string) {
     cp = (cp << 6) | (chr[i] & 0x3F);
   }
 
+  // Reject overlong encodings, surrogates, and out-of-range values
+  const bool overlong = (bytes == 2 && cp < 0x80) || (bytes == 3 && cp < 0x800) || (bytes == 4 && cp < 0x10000);
+  const bool surrogate = (cp >= 0xD800 && cp <= 0xDFFF);
+  if (overlong || surrogate || cp > 0x10FFFF) {
+    (*string)++;
+    return REPLACEMENT_GLYPH;
+  }
+
+  *string += bytes;
+
   return cp;
+}
+
+void utf8AppendCodepoint(const uint32_t cp, std::string& out) {
+  if (cp < 0x80) {
+    out += static_cast<char>(cp);
+  } else if (cp < 0x800) {
+    out += static_cast<char>(0xC0 | (cp >> 6));
+    out += static_cast<char>(0x80 | (cp & 0x3F));
+  } else if (cp < 0x10000) {
+    out += static_cast<char>(0xE0 | (cp >> 12));
+    out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+    out += static_cast<char>(0x80 | (cp & 0x3F));
+  } else {
+    out += static_cast<char>(0xF0 | (cp >> 18));
+    out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+    out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+    out += static_cast<char>(0x80 | (cp & 0x3F));
+  }
+}
+
+int utf8SafeTruncateBuffer(const char* buf, int len) {
+  if (len <= 0) return 0;
+
+  // Walk back past continuation bytes (10xxxxxx) to find the lead byte
+  int leadPos = len - 1;
+  while (leadPos > 0 && (static_cast<uint8_t>(buf[leadPos]) & 0xC0) == 0x80) {
+    leadPos--;
+  }
+
+  // Determine expected length of the sequence starting at leadPos
+  int expectedLen = utf8CodepointLen(static_cast<unsigned char>(buf[leadPos]));
+  int actualLen = len - leadPos;
+
+  if (actualLen < expectedLen && leadPos > 0) {
+    // Incomplete UTF-8 sequence at the end — exclude it
+    return leadPos;
+  }
+  return len;
 }
 
 size_t utf8RemoveLastChar(std::string& str) {
   if (str.empty()) return 0;
   size_t pos = str.size() - 1;
-  // Walk back to find the start of the last UTF-8 character
-  // UTF-8 continuation bytes start with 10xxxxxx (0x80-0xBF)
   while (pos > 0 && (static_cast<unsigned char>(str[pos]) & 0xC0) == 0x80) {
     --pos;
   }
@@ -42,65 +172,9 @@ size_t utf8RemoveLastChar(std::string& str) {
   return pos;
 }
 
-void utf8TruncateChars(std::string& str, size_t numChars) {
+// Truncate string by removing N UTF-8 characters from the end
+void utf8TruncateChars(std::string& str, const size_t numChars) {
   for (size_t i = 0; i < numChars && !str.empty(); ++i) {
     utf8RemoveLastChar(str);
   }
-}
-
-size_t utf8SafeCopy(char* dest, const char* src, size_t destCap) {
-  if (dest == nullptr || destCap == 0) return 0;
-  if (src == nullptr) {
-    dest[0] = '\0';
-    return 0;
-  }
-
-  // Walk up to destCap-1 bytes, but only accept complete UTF-8 sequences.
-  const size_t maxBytes = destCap - 1;
-  size_t pos = 0;
-  while (src[pos] != '\0') {
-    const auto lead = static_cast<unsigned char>(src[pos]);
-    // How many bytes does THIS codepoint occupy?
-    size_t codepointLen;
-    if (lead < 0x80)          codepointLen = 1;
-    else if ((lead >> 5) == 0x6) codepointLen = 2;
-    else if ((lead >> 4) == 0xE) codepointLen = 3;
-    else if ((lead >> 3) == 0x1E) codepointLen = 4;
-    else {
-      // Stray continuation or invalid lead byte. Treat it as a single
-      // byte so we make progress and don't infinite-loop on bad input.
-      codepointLen = 1;
-    }
-    if (pos + codepointLen > maxBytes) break;
-    for (size_t i = 0; i < codepointLen; ++i) {
-      // Bail out cleanly if the source ends inside a multi-byte sequence.
-      if (src[pos + i] == '\0') {
-        dest[pos] = '\0';
-        return pos;
-      }
-      dest[pos + i] = src[pos + i];
-    }
-    pos += codepointLen;
-  }
-  dest[pos] = '\0';
-  return pos;
-}
-
-int utf8UnicodeWhitespaceBytes(const char* s, int remaining) {
-  if (s == nullptr || remaining < 2) return 0;
-  const auto b0 = static_cast<uint8_t>(s[0]);
-  const auto b1 = static_cast<uint8_t>(s[1]);
-  // U+00A0 NO-BREAK SPACE  => 0xC2 0xA0
-  if (b0 == 0xC2 && b1 == 0xA0) return 2;
-  if (remaining < 3) return 0;
-  const auto b2 = static_cast<uint8_t>(s[2]);
-  // U+2000..U+200A (EN QUAD .. HAIR SPACE)  => 0xE2 0x80 0x80..0x8A
-  if (b0 == 0xE2 && b1 == 0x80 && b2 >= 0x80 && b2 <= 0x8A) return 3;
-  // U+202F NARROW NO-BREAK SPACE            => 0xE2 0x80 0xAF
-  if (b0 == 0xE2 && b1 == 0x80 && b2 == 0xAF) return 3;
-  // U+205F MEDIUM MATHEMATICAL SPACE        => 0xE2 0x81 0x9F
-  if (b0 == 0xE2 && b1 == 0x81 && b2 == 0x9F) return 3;
-  // U+3000 IDEOGRAPHIC SPACE                => 0xE3 0x80 0x80
-  if (b0 == 0xE3 && b1 == 0x80 && b2 == 0x80) return 3;
-  return 0;
 }

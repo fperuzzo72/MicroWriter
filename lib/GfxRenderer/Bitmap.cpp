@@ -1,7 +1,5 @@
 #include "Bitmap.h"
 
-#include <MemoryArena.h>
-
 #include <cstdlib>
 #include <cstring>
 
@@ -16,26 +14,34 @@ constexpr bool USE_ATKINSON = true;  // Use Atkinson dithering instead of Floyd-
 // ============================================================================
 
 Bitmap::~Bitmap() {
+  delete[] errorCurRow;
+  delete[] errorNextRow;
+
   delete atkinsonDitherer;
   delete fsDitherer;
 }
 
-uint16_t Bitmap::readLE16() {
-  const int c0 = file.read();
-  const int c1 = file.read();
-  if (c0 < 0 || c1 < 0) readOk_ = false;
-  return static_cast<uint16_t>(c0 < 0 ? 0 : c0) | (static_cast<uint16_t>(c1 < 0 ? 0 : c1) << 8);
+uint16_t Bitmap::readLE16(FsFile& f) {
+  const int c0 = f.read();
+  const int c1 = f.read();
+  const auto b0 = static_cast<uint8_t>(c0 < 0 ? 0 : c0);
+  const auto b1 = static_cast<uint8_t>(c1 < 0 ? 0 : c1);
+  return static_cast<uint16_t>(b0) | (static_cast<uint16_t>(b1) << 8);
 }
 
-uint32_t Bitmap::readLE32() {
-  const int c0 = file.read();
-  const int c1 = file.read();
-  const int c2 = file.read();
-  const int c3 = file.read();
-  if (c0 < 0 || c1 < 0 || c2 < 0 || c3 < 0) readOk_ = false;
+uint32_t Bitmap::readLE32(FsFile& f) {
+  const int c0 = f.read();
+  const int c1 = f.read();
+  const int c2 = f.read();
+  const int c3 = f.read();
 
-  return static_cast<uint32_t>(c0 < 0 ? 0 : c0) | (static_cast<uint32_t>(c1 < 0 ? 0 : c1) << 8) |
-         (static_cast<uint32_t>(c2 < 0 ? 0 : c2) << 16) | (static_cast<uint32_t>(c3 < 0 ? 0 : c3) << 24);
+  const auto b0 = static_cast<uint8_t>(c0 < 0 ? 0 : c0);
+  const auto b1 = static_cast<uint8_t>(c1 < 0 ? 0 : c1);
+  const auto b2 = static_cast<uint8_t>(c2 < 0 ? 0 : c2);
+  const auto b3 = static_cast<uint8_t>(c3 < 0 ? 0 : c3);
+
+  return static_cast<uint32_t>(b0) | (static_cast<uint32_t>(b1) << 8) | (static_cast<uint32_t>(b2) << 16) |
+         (static_cast<uint32_t>(b3) << 24);
 }
 
 const char* Bitmap::errorToString(BmpReaderError err) {
@@ -81,29 +87,24 @@ BmpReaderError Bitmap::parseHeaders() {
   if (!file.seek(0)) return BmpReaderError::SeekStartFailed;
 
   // --- BMP FILE HEADER ---
-  readOk_ = true;
-  const uint16_t bfType = readLE16();
+  const uint16_t bfType = readLE16(file);
   if (bfType != 0x4D42) return BmpReaderError::NotBMP;
 
   file.seekCur(8);
-  bfOffBits = readLE32();
+  bfOffBits = readLE32(file);
 
   // --- DIB HEADER ---
-  const uint32_t biSize = readLE32();
+  const uint32_t biSize = readLE32(file);
   if (biSize < 40) return BmpReaderError::DIBTooSmall;
 
-  width = static_cast<int32_t>(readLE32());
-  const auto rawHeight = static_cast<int32_t>(readLE32());
+  width = static_cast<int32_t>(readLE32(file));
+  const auto rawHeight = static_cast<int32_t>(readLE32(file));
   topDown = rawHeight < 0;
   height = topDown ? -rawHeight : rawHeight;
 
-  const uint16_t planes = readLE16();
-  bpp = readLE16();
-  const uint32_t comp = readLE32();
-
-  // Catch truncated/corrupt headers before using parsed values
-  if (!readOk_) return BmpReaderError::FileInvalid;
-
+  const uint16_t planes = readLE16(file);
+  bpp = readLE16(file);
+  const uint32_t comp = readLE32(file);
   const bool validBpp = bpp == 1 || bpp == 2 || bpp == 4 || bpp == 8 || bpp == 24 || bpp == 32;
 
   if (planes != 1) return BmpReaderError::BadPlanes;
@@ -112,8 +113,7 @@ BmpReaderError Bitmap::parseHeaders() {
   if (!(comp == 0 || (bpp == 32 && comp == 3))) return BmpReaderError::UnsupportedCompression;
 
   file.seekCur(12);  // biSizeImage, biXPelsPerMeter, biYPelsPerMeter
-  colorsUsed = readLE32();
-  if (!readOk_) return BmpReaderError::FileInvalid;
+  colorsUsed = readLE32(file);
   // BMP spec: colorsUsed==0 means default (2^bpp for paletted formats)
   if (colorsUsed == 0 && bpp <= 8) colorsUsed = 1u << bpp;
   if (colorsUsed > 256u) return BmpReaderError::PaletteTooLarge;
@@ -135,7 +135,7 @@ BmpReaderError Bitmap::parseHeaders() {
   if (colorsUsed > 0) {
     for (uint32_t i = 0; i < colorsUsed; i++) {
       uint8_t rgb[4];
-      if (file.read(rgb, 4) != 4) return BmpReaderError::FileInvalid;
+      file.read(rgb, 4);  // Read B, G, R, Reserved in one go
       paletteLum[i] = (77u * rgb[2] + 150u * rgb[1] + 29u * rgb[0]) >> 8;
     }
   }
@@ -146,10 +146,9 @@ BmpReaderError Bitmap::parseHeaders() {
 
   // Check if palette luminances map cleanly to the display's 4 native gray levels.
   // Native levels are 0, 85, 170, 255 — i.e. values where (lum >> 6) is lossless.
-  // If all palette entries are near a native level, we can skip dithering entirely
-  // to avoid double-dithering artifacts on pre-quantized images.
+  // If all palette entries are near a native level, we can skip dithering entirely.
   nativePalette = bpp <= 2;  // 1-bit and 2-bit are always native
-  if (!nativePalette && colorsUsed > 0 && bpp <= 8) {
+  if (!nativePalette && colorsUsed > 0) {
     nativePalette = true;
     for (uint32_t i = 0; i < colorsUsed; i++) {
       const uint8_t lum = paletteLum[i];
@@ -162,47 +161,16 @@ BmpReaderError Bitmap::parseHeaders() {
     }
   }
 
-  // Clean up existing ditherers (safe if nullptr)
-  delete atkinsonDitherer;
-  atkinsonDitherer = nullptr;
-  delete fsDitherer;
-  fsDitherer = nullptr;
-
   // Decide pixel processing strategy:
-  //  - Native palette → direct mapping, no dithering needed
-  //  - High-color + dithering enabled → error-diffusion dithering
-  //  - High-color + dithering disabled → simple quantization
-  const bool needsDithering = !nativePalette && dithering;
-  // Use arena-backed memory when available to avoid heap fragmentation
-  if (needsDithering) {
-    // -fno-exceptions: a failing `new` aborts the device. Use nothrow
-    // and null-check before isValid() so heap-exhausted dither
-    // allocation falls back to undithered output instead of bricking
-    // the boot.
+  //  - Native palette → direct mapping, no processing needed
+  //  - High-color + dithering enabled → error-diffusion dithering (Atkinson or Floyd-Steinberg)
+  //  - High-color + dithering disabled → simple quantization (no error diffusion)
+  const bool highColor = !nativePalette;
+  if (highColor && dithering) {
     if (USE_ATKINSON) {
-      if (sumi::MemoryArena::isInitialized() && sumi::MemoryArena::ditherRegion) {
-        atkinsonDitherer = new (std::nothrow) AtkinsonDitherer(
-            width, sumi::MemoryArena::ditherRegion,
-            sumi::MemoryArena::DITHER_REGION_SIZE);
-      } else {
-        atkinsonDitherer = new (std::nothrow) AtkinsonDitherer(width);
-      }
-      if (atkinsonDitherer && !atkinsonDitherer->isValid()) {
-        delete atkinsonDitherer;
-        atkinsonDitherer = nullptr;
-      }
+      atkinsonDitherer = new AtkinsonDitherer(width);
     } else {
-      if (sumi::MemoryArena::isInitialized() && sumi::MemoryArena::ditherRegion) {
-        fsDitherer = new (std::nothrow) FloydSteinbergDitherer(
-            width, sumi::MemoryArena::ditherRegion,
-            sumi::MemoryArena::DITHER_REGION_SIZE);
-      } else {
-        fsDitherer = new (std::nothrow) FloydSteinbergDitherer(width);
-      }
-      if (fsDitherer && !fsDitherer->isValid()) {
-        delete fsDitherer;
-        fsDitherer = nullptr;
-      }
+      fsDitherer = new FloydSteinbergDitherer(width);
     }
   }
 
@@ -210,7 +178,7 @@ BmpReaderError Bitmap::parseHeaders() {
 }
 
 // packed 2bpp output, 0 = black, 1 = dark gray, 2 = light gray, 3 = white
-BmpReaderError Bitmap::readRow(uint8_t* data, uint8_t* rowBuffer, int rowY) const {
+BmpReaderError Bitmap::readNextRow(uint8_t* data, uint8_t* rowBuffer) const {
   // Note: rowBuffer should be pre-allocated by the caller to size 'rowBytes'
   if (file.read(rowBuffer, rowBytes) != rowBytes) return BmpReaderError::ShortReadRow;
 
@@ -230,7 +198,7 @@ BmpReaderError Bitmap::readRow(uint8_t* data, uint8_t* rowBuffer, int rowY) cons
       color = fsDitherer->processPixel(adjustPixel(lum), currentX);
     } else {
       if (nativePalette) {
-        // Palette matches native gray levels: direct mapping, no dithering
+        // Palette matches native gray levels: direct mapping (still apply brightness/contrast/gamma)
         color = static_cast<uint8_t>(adjustPixel(lum) >> 6);
       } else {
         // Non-native palette with dithering disabled: simple quantization
@@ -291,7 +259,10 @@ BmpReaderError Bitmap::readRow(uint8_t* data, uint8_t* rowBuffer, int rowY) cons
     }
     case 1: {
       for (int x = 0; x < width; x++) {
-        lum = (rowBuffer[x >> 3] & (0x80 >> (x & 7))) ? 0xFF : 0x00;
+        // Get palette index (0 or 1) from bit at position x
+        const uint8_t palIndex = (rowBuffer[x >> 3] & (0x80 >> (x & 7))) ? 1 : 0;
+        // Use palette lookup for proper black/white mapping
+        lum = paletteLum[palIndex];
         packPixel(lum);
       }
       break;
@@ -316,8 +287,7 @@ BmpReaderError Bitmap::rewindToData() const {
     return BmpReaderError::SeekPixelDataFailed;
   }
 
-  // Reset dithering state when rewinding
-  prevRowY = -1;
+  // Reset dithering when rewinding
   if (fsDitherer) fsDitherer->reset();
   if (atkinsonDitherer) atkinsonDitherer->reset();
 

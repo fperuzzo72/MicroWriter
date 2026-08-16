@@ -1,128 +1,128 @@
 #include "SleepScreenCache.h"
 
-#include <Arduino.h>
-#include <SDCardManager.h>
+#include <GfxRenderer.h>
+#include <HalDisplay.h>
+#include <HalStorage.h>
+#include <Logging.h>
 
-#include <cstring>
+#include "CrossPointSettings.h"
 
-namespace sumi {
-
-uint32_t SleepScreenCache::fnv1a(const uint8_t* data, size_t len) {
-  uint32_t hash = 0x811c9dc5u;
-  for (size_t i = 0; i < len; i++) {
-    hash ^= data[i];
-    hash *= 0x01000193u;
-  }
-  return hash;
-}
-
-uint32_t SleepScreenCache::computeKey(uint8_t sleepMode, const char* imagePath) {
-  // Hash sleep mode byte
-  uint32_t hash = fnv1a(&sleepMode, 1);
-
-  // Fold in image path if present
-  if (imagePath && imagePath[0]) {
-    size_t pathLen = strlen(imagePath);
-    // Continue the hash chain from where we left off
-    for (size_t i = 0; i < pathLen; i++) {
-      hash ^= static_cast<uint8_t>(imagePath[i]);
-      hash *= 0x01000193u;
-    }
-  }
-
-  return hash;
-}
-
-bool SleepScreenCache::load(uint32_t cacheKey, uint8_t* framebuffer) {
-  if (!framebuffer) return false;
-
-  char path[48];
-  snprintf(path, sizeof(path), "%s/%08lx.raw", CACHE_DIR, (unsigned long)cacheKey);
-
+namespace {
+uint32_t getSourceFileSize(const std::string& sourcePath) {
   FsFile file;
-  if (!SdMan.openFileForRead("SLC", path, file)) {
+  if (!Storage.openFileForRead("SLC", sourcePath, file)) {
+    return 0;
+  }
+  const uint32_t size = file.fileSize();
+  file.close();
+  return size;
+}
+}  // namespace
+
+uint32_t SleepScreenCache::hashKey(const std::string& sourcePath, const uint32_t fileSize) {
+  uint32_t hash = 2166136261u;
+  for (char c : sourcePath) {
+    hash ^= static_cast<uint8_t>(c);
+    hash *= 16777619u;
+  }
+  for (int i = 0; i < 4; i++) {
+    hash ^= static_cast<uint8_t>((fileSize >> (i * 8)) & 0xFF);
+    hash *= 16777619u;
+  }
+  hash ^= static_cast<uint8_t>(SETTINGS.sleepScreenCoverFilter);
+  hash *= 16777619u;
+  hash ^= static_cast<uint8_t>(SETTINGS.sleepScreenCoverMode);
+  hash *= 16777619u;
+  return hash;
+}
+
+std::string SleepScreenCache::getCachePath(const std::string& sourcePath, const uint32_t fileSize) {
+  char filename[64];
+  snprintf(filename, sizeof(filename), "%s/%08x.raw", CACHE_DIR, hashKey(sourcePath, fileSize));
+  return std::string(filename);
+}
+
+bool SleepScreenCache::load(GfxRenderer& renderer, const std::string& sourcePath) {
+  const uint32_t sourceSize = getSourceFileSize(sourcePath);
+  if (sourceSize == 0) {
     return false;
   }
 
-  // Validate file size before reading
-  uint64_t fileSize = file.size();
-  if (fileSize != BUFFER_SIZE) {
-    Serial.printf("[SLC] Cache file size mismatch: %lu (expected %u)\n",
-                  (unsigned long)fileSize, (unsigned)BUFFER_SIZE);
+  const auto path = getCachePath(sourcePath, sourceSize);
+  FsFile file;
+  if (!Storage.openFileForRead("SLC", path, file)) {
+    return false;
+  }
+
+  const uint32_t bufferSize = display.getBufferSize();
+  if (file.fileSize() != bufferSize) {
+    LOG_ERR("SLC", "Invalid cache size for %s", path.c_str());
     file.close();
+    Storage.remove(path.c_str());
     return false;
   }
 
-  int bytesRead = file.read(framebuffer, BUFFER_SIZE);
+  uint8_t* frameBuffer = renderer.getFrameBuffer();
+  const int bytesRead = file.read(frameBuffer, bufferSize);
   file.close();
 
-  if (bytesRead < 0 || static_cast<size_t>(bytesRead) != BUFFER_SIZE) {
-    Serial.printf("[SLC] Cache read incomplete: %d bytes\n", bytesRead);
+  if (bytesRead != static_cast<int>(bufferSize)) {
+    LOG_ERR("SLC", "Incomplete cache read for %s", path.c_str());
     return false;
   }
 
-  Serial.printf("[SLC] Cache hit: %s\n", path);
+  LOG_DBG("SLC", "Loaded cache: %s", path.c_str());
   return true;
 }
 
-void SleepScreenCache::save(uint32_t cacheKey, const uint8_t* framebuffer) {
-  if (!framebuffer) return;
+void SleepScreenCache::save(const GfxRenderer& renderer, const std::string& sourcePath) {
+  Storage.mkdir(CACHE_DIR);
 
-  // Ensure cache directory exists
-  SdMan.ensureDirectoryExists(CACHE_DIR);
+  const uint32_t sourceSize = getSourceFileSize(sourcePath);
+  if (sourceSize == 0) {
+    return;
+  }
 
-  char path[48];
-  snprintf(path, sizeof(path), "%s/%08lx.raw", CACHE_DIR, (unsigned long)cacheKey);
-
+  const auto path = getCachePath(sourcePath, sourceSize);
   FsFile file;
-  if (!SdMan.openFileForWrite("SLC", path, file)) {
-    Serial.println("[SLC] Failed to open cache file for writing");
+  if (!Storage.openFileForWrite("SLC", path, file)) {
+    LOG_ERR("SLC", "Could not open cache file %s", path.c_str());
     return;
   }
 
-  size_t written = file.write(framebuffer, BUFFER_SIZE);
-  SdMan.syncAndClose(file);
+  const uint32_t bufferSize = display.getBufferSize();
+  const uint8_t* frameBuffer = renderer.getFrameBuffer();
+  const size_t bytesWritten = file.write(frameBuffer, bufferSize);
+  file.close();
 
-  if (written != BUFFER_SIZE) {
-    Serial.printf("[SLC] Cache write incomplete: %u bytes\n", (unsigned)written);
-    // Remove partial file
-    SdMan.remove(path);
+  if (bytesWritten != bufferSize) {
+    LOG_ERR("SLC", "Incomplete cache write for %s", path.c_str());
+    Storage.remove(path.c_str());
     return;
   }
 
-  Serial.printf("[SLC] Cached: %s\n", path);
+  LOG_DBG("SLC", "Saved cache: %s", path.c_str());
 }
 
-void SleepScreenCache::clearAll() {
-  FsFile dir = SdMan.open(CACHE_DIR);
+int SleepScreenCache::invalidateAll() {
+  auto dir = Storage.open(CACHE_DIR);
   if (!dir || !dir.isDirectory()) {
-    if (dir) dir.close();
-    return;
+    if (dir) {
+      dir.close();
+    }
+    return 0;
   }
 
-  char name[48];
-  FsFile entry;
-  int removed = 0;
-  while (entry.openNext(&dir, O_RDONLY)) {
-    if (entry.isDirectory()) {
-      entry.close();
-      continue;
-    }
-    entry.getName(name, sizeof(name));
-    entry.close();
-
-    // Only remove .raw files in the cache directory
-    const char* ext = strrchr(name, '.');
-    if (ext && strcasecmp(ext, ".raw") == 0) {
-      char fullPath[80];
-      snprintf(fullPath, sizeof(fullPath), "%s/%s", CACHE_DIR, name);
-      SdMan.remove(fullPath);
-      removed++;
+  int count = 0;
+  char name[128];
+  for (auto file = dir.openNextFile(); file; file = dir.openNextFile()) {
+    file.getName(name, sizeof(name));
+    file.close();
+    const auto fullPath = std::string(CACHE_DIR) + "/" + name;
+    if (Storage.remove(fullPath.c_str())) {
+      count++;
     }
   }
   dir.close();
-
-  Serial.printf("[SLC] Cleared %d cached sleep screen(s)\n", removed);
+  return count;
 }
-
-}  // namespace sumi

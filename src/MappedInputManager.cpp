@@ -1,74 +1,179 @@
 #include "MappedInputManager.h"
 
-#include "core/SumiSettings.h"
+#include "CrossPointSettings.h"
 
-// Physical button layout:
-//   - frontLayout (FrontBCLR vs FrontLRBC) swaps the BOTTOM two toggle
-//     switches between Back/Confirm and Left/Right. This is a pure
-//     hardware remap and applies to every state.
-//   - sideButtonLayout (PrevNext vs NextPrev) used to also swap the side
-//     toggle between Up/Down, which broke menu navigation in every
-//     non-reader state (user feedback: "the top sidebutton move the page
-//     forward and bottom go backwards. While SUMI has a setting for this,
-//     changing it also messes up the normal up down movements in menus").
-//     That swap now lives inside ReaderState page navigation only; here
-//     Up/Down are a direct 1:1 hardware mapping.
-decltype(InputManager::BTN_BACK) MappedInputManager::mapButton(const Button button) const {
-  const auto frontLayout = settings_ ? static_cast<sumi::Settings::FrontButtonLayout>(settings_->frontButtonLayout)
-                                     : sumi::Settings::FrontBCLR;
+#include <string>
+
+namespace {
+using ButtonIndex = uint8_t;
+
+struct SideLayoutMap {
+  ButtonIndex pageBack;
+  ButtonIndex pageForward;
+};
+
+// Order matches CrossPointSettings::SIDE_BUTTON_LAYOUT.
+constexpr SideLayoutMap kSideLayouts[] = {
+    {HalGPIO::BTN_UP, HalGPIO::BTN_DOWN},
+    {HalGPIO::BTN_DOWN, HalGPIO::BTN_UP},
+};
+
+bool isAsciiAlphaNum(const unsigned char c) {
+  return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+}
+
+std::string sanitizeBackLabel(const char* label) {
+  if (label == nullptr || label[0] == '\0') {
+    return "";
+  }
+
+  std::string text(label);
+  bool hadPrefix = false;
+
+  if (text.size() >= 2 && static_cast<unsigned char>(text[0]) == 0xC2 &&
+      static_cast<unsigned char>(text[1]) == 0xAB) {
+    text.erase(0, 2);
+    hadPrefix = true;
+  } else if (!text.empty() && static_cast<unsigned char>(text[0]) == 0xAB) {
+    text.erase(0, 1);
+    hadPrefix = true;
+  } else {
+    const size_t firstSpace = text.find(' ');
+    if (firstSpace != std::string::npos && firstSpace > 0 && firstSpace <= 24 && firstSpace + 1 < text.size()) {
+      bool hasNonAscii = false;
+      bool hasAsciiLetters = false;
+      for (size_t i = 0; i < firstSpace; ++i) {
+        const unsigned char c = static_cast<unsigned char>(text[i]);
+        if (c >= 0x80) {
+          hasNonAscii = true;
+        }
+        if (isAsciiAlphaNum(c)) {
+          hasAsciiLetters = true;
+        }
+      }
+
+      if (hasNonAscii && !hasAsciiLetters) {
+        text.erase(0, firstSpace + 1);
+        hadPrefix = true;
+      }
+    }
+  }
+
+  if (hadPrefix) {
+    while (!text.empty() && (text.front() == ' ' || text.front() == '\t')) {
+      text.erase(text.begin());
+    }
+    text.insert(0, "<< ");
+  }
+
+  return text;
+}
+}  // namespace
+
+bool MappedInputManager::mapButton(const Button button, bool (HalGPIO::*fn)(uint8_t) const) const {
+  const auto sideLayout = static_cast<CrossPointSettings::SIDE_BUTTON_LAYOUT>(SETTINGS.sideButtonLayout);
+  const auto& side = kSideLayouts[sideLayout];
 
   switch (button) {
     case Button::Back:
-      switch (frontLayout) {
-        case sumi::Settings::FrontLRBC:
-          return InputManager::BTN_LEFT;
-        case sumi::Settings::FrontBCLR:
-        default:
-          return InputManager::BTN_BACK;
-      }
+      // Logical Back maps to user-configured front button.
+      return (gpio.*fn)(SETTINGS.frontButtonBack);
     case Button::Confirm:
-      switch (frontLayout) {
-        case sumi::Settings::FrontLRBC:
-          return InputManager::BTN_RIGHT;
-        case sumi::Settings::FrontBCLR:
-        default:
-          return InputManager::BTN_CONFIRM;
-      }
+      // Logical Confirm maps to user-configured front button.
+      return (gpio.*fn)(SETTINGS.frontButtonConfirm);
     case Button::Left:
-      switch (frontLayout) {
-        case sumi::Settings::FrontLRBC:
-          return InputManager::BTN_BACK;
-        case sumi::Settings::FrontBCLR:
-        default:
-          return InputManager::BTN_LEFT;
-      }
+      // Logical Left maps to user-configured front button.
+      return (gpio.*fn)(SETTINGS.frontButtonLeft);
     case Button::Right:
-      switch (frontLayout) {
-        case sumi::Settings::FrontLRBC:
-          return InputManager::BTN_CONFIRM;
-        case sumi::Settings::FrontBCLR:
-        default:
-          return InputManager::BTN_RIGHT;
-      }
+      // Logical Right maps to user-configured front button.
+      return (gpio.*fn)(SETTINGS.frontButtonRight);
     case Button::Up:
-      return InputManager::BTN_UP;
+      // Side buttons remain fixed for Up/Down.
+      return (gpio.*fn)(HalGPIO::BTN_UP);
     case Button::Down:
-      return InputManager::BTN_DOWN;
+      // Side buttons remain fixed for Up/Down.
+      return (gpio.*fn)(HalGPIO::BTN_DOWN);
     case Button::Power:
-      return InputManager::BTN_POWER;
+      // Power button bypasses remapping.
+      return (gpio.*fn)(HalGPIO::BTN_POWER);
+    case Button::PageBack:
+      // Reader page navigation uses side buttons and can be swapped via settings.
+      return (gpio.*fn)(side.pageBack);
+    case Button::PageForward:
+      // Reader page navigation uses side buttons and can be swapped via settings.
+      return (gpio.*fn)(side.pageForward);
   }
 
-  return InputManager::BTN_BACK;
+  return false;
 }
 
-bool MappedInputManager::wasPressed(const Button button) const { return inputManager.wasPressed(mapButton(button)); }
+bool MappedInputManager::wasPressed(const Button button) const { return mapButton(button, &HalGPIO::wasPressed); }
 
-bool MappedInputManager::wasReleased(const Button button) const { return inputManager.wasReleased(mapButton(button)); }
+void MappedInputManager::armConfirmReleaseGuard() const { suppressConfirmReleaseUntilButtonUp = true; }
 
-bool MappedInputManager::isPressed(const Button button) const { return inputManager.isPressed(mapButton(button)); }
+bool MappedInputManager::wasReleased(const Button button) const {
+  if (button == Button::Confirm && suppressConfirmReleaseUntilButtonUp) {
+    if (!isPressed(Button::Confirm)) {
+      suppressConfirmReleaseUntilButtonUp = false;
+    }
+    return false;
+  }
+  return mapButton(button, &HalGPIO::wasReleased);
+}
 
-bool MappedInputManager::wasAnyPressed() const { return inputManager.wasAnyPressed(); }
+bool MappedInputManager::isPressed(const Button button) const { return mapButton(button, &HalGPIO::isPressed); }
 
-bool MappedInputManager::wasAnyReleased() const { return inputManager.wasAnyReleased(); }
+bool MappedInputManager::wasAnyPressed() const { return gpio.wasAnyPressed(); }
 
-unsigned long MappedInputManager::getHeldTime() const { return inputManager.getHeldTime(); }
+bool MappedInputManager::wasAnyReleased() const { return gpio.wasAnyReleased(); }
+
+unsigned long MappedInputManager::getHeldTime() const { return gpio.getHeldTime(); }
+
+MappedInputManager::Labels MappedInputManager::mapLabels(const char* back, const char* confirm, const char* previous,
+                                                         const char* next) const {
+  thread_local std::string sanitized[4];
+
+  sanitized[0] = sanitizeBackLabel(back);
+  sanitized[1] = confirm ? confirm : "";
+  sanitized[2] = previous ? previous : "";
+  sanitized[3] = next ? next : "";
+
+  // Generic UI navigation is not orientation-swapped; reader page turns handle
+  // their own orientation-aware mapping in ReaderUtils::detectPageTurn().
+  auto labelForHardware = [&](uint8_t hw) -> const char* {
+    if (hw == SETTINGS.frontButtonBack) {
+      return sanitized[0].c_str();
+    }
+    if (hw == SETTINGS.frontButtonConfirm) {
+      return sanitized[1].c_str();
+    }
+    if (hw == SETTINGS.frontButtonLeft) {
+      return sanitized[2].c_str();
+    }
+    if (hw == SETTINGS.frontButtonRight) {
+      return sanitized[3].c_str();
+    }
+    return "";
+  };
+
+  return {labelForHardware(HalGPIO::BTN_BACK), labelForHardware(HalGPIO::BTN_CONFIRM),
+          labelForHardware(HalGPIO::BTN_LEFT), labelForHardware(HalGPIO::BTN_RIGHT)};
+}
+
+int MappedInputManager::getPressedFrontButton() const {
+  // Scan the raw front buttons in hardware order.
+  // This bypasses remapping so the remap activity can capture physical presses.
+  if (gpio.wasPressed(HalGPIO::BTN_BACK)) {
+    return HalGPIO::BTN_BACK;
+  }
+  if (gpio.wasPressed(HalGPIO::BTN_CONFIRM)) {
+    return HalGPIO::BTN_CONFIRM;
+  }
+  if (gpio.wasPressed(HalGPIO::BTN_LEFT)) {
+    return HalGPIO::BTN_LEFT;
+  }
+  if (gpio.wasPressed(HalGPIO::BTN_RIGHT)) {
+    return HalGPIO::BTN_RIGHT;
+  }
+  return -1;
+}

@@ -1,13 +1,13 @@
 #pragma once
-#include <SdFat.h>
+#include <HalStorage.h>
 
+#include <deque>
 #include <string>
+#include <string_view>
 #include <unordered_map>
-#include <vector>
 
 class ZipFile {
  public:
-  static constexpr size_t DECOMP_DICT_SIZE = 32768;  // Must match TINFL_LZ_DICT_SIZE
   struct FileStatSlim {
     uint16_t method;             // Compression method
     uint32_t compressedSize;     // Compressed size
@@ -21,19 +21,14 @@ class ZipFile {
     bool isSet;
   };
 
+  // Target for batch uncompressed size lookup (sorted by hash, then len)
   struct SizeTarget {
     uint64_t hash;   // FNV-1a 64-bit hash of normalized path
-    uint16_t len;    // Length for collision reduction
+    uint16_t len;    // Length of path for collision reduction
     uint16_t index;  // Caller's index (e.g. spine index)
-
-    bool operator<(const SizeTarget& other) const {
-      return hash < other.hash || (hash == other.hash && len < other.len);
-    }
   };
 
-  // FNV-1a 64-bit hash (no std::string allocation)
-  // Combined with 16-bit length provides ~80 bits of entropy;
-  // collision probability negligible for typical EPUB file counts
+  // FNV-1a 64-bit hash computed from char buffer (no std::string allocation)
   static uint64_t fnvHash64(const char* s, size_t len) {
     uint64_t hash = 14695981039346656037ull;
     for (size_t i = 0; i < len; i++) {
@@ -49,6 +44,10 @@ class ZipFile {
   ZipDetails zipDetails = {0, 0, false};
   std::unordered_map<std::string, FileStatSlim> fileStatSlimCache;
 
+  // Cursor for sequential central-dir scanning optimization
+  uint32_t lastCentralDirPos = 0;
+  bool lastCentralDirPosValid = false;
+
   bool loadFileStatSlim(const char* filename, FileStatSlim* fileStat);
   long getDataOffset(const FileStatSlim& fileStat);
   bool loadZipDetails();
@@ -62,17 +61,70 @@ class ZipFile {
   bool open();
   bool close();
   bool loadAllFileStatSlims();
-  uint16_t getTotalEntries();
   bool getInflatedFileSize(const char* filename, size_t* size);
   // Batch lookup: scan ZIP central dir once and fill sizes for matching targets.
   // targets must be sorted by (hash, len). sizes[target.index] receives uncompressedSize.
   // Returns number of targets matched.
-  int fillUncompressedSizes(std::vector<SizeTarget>& targets, std::vector<uint32_t>& sizes);
-  // Find first existing file from a list of paths. Returns index into paths array, or -1 if none found.
-  // More efficient than calling getInflatedFileSize() for each path individually.
-  int findFirstExisting(const char* const* paths, int pathCount);
+  int fillUncompressedSizes(std::deque<SizeTarget>& targets, std::deque<uint32_t>& sizes);
   // Due to the memory required to run each of these, it is recommended to not preopen the zip file for multiple
   // These functions will open and close the zip as needed
   uint8_t* readFileToMemory(const char* filename, size_t* size = nullptr, bool trailingNullByte = false);
-  bool readFileToStream(const char* filename, Print& out, size_t chunkSize, uint8_t* dictBuffer = nullptr);
+  bool readFileToStream(const char* filename, Print& out, size_t chunkSize, bool allowEarlyStop = false);
+  bool readFilePrefixToBuffer(const char* filename, uint8_t* out, size_t maxBytes, size_t* bytesRead, size_t chunkSize);
+
+  template <typename F>
+  bool enumerateFilePaths(F&& callback) {
+    if (!fileStatSlimCache.empty()) {
+      for (const auto& entry : fileStatSlimCache) {
+        callback(std::string_view{entry.first});
+      }
+      return true;
+    }
+
+    const bool wasOpen = isOpen();
+    if (!wasOpen && !open()) {
+      return false;
+    }
+
+    if (!loadZipDetails()) {
+      if (!wasOpen) {
+        close();
+      }
+      return false;
+    }
+
+    file.seek(zipDetails.centralDirOffset);
+
+    uint32_t sig;
+    char itemName[256];
+
+    while (file.available()) {
+      file.read(&sig, 4);
+      if (sig != 0x02014b50) {
+        break;
+      }
+
+      file.seekCur(24);
+      uint16_t nameLen, m, k;
+      file.read(&nameLen, 2);
+      file.read(&m, 2);
+      file.read(&k, 2);
+      file.seekCur(12);
+
+      if (nameLen < sizeof(itemName)) {
+        file.read(itemName, nameLen);
+        itemName[nameLen] = '\0';
+        callback(std::string_view{itemName, nameLen});
+      } else {
+        file.seekCur(nameLen);
+      }
+
+      file.seekCur(m + k);
+    }
+
+    if (!wasOpen) {
+      close();
+    }
+    return true;
+  }
 };

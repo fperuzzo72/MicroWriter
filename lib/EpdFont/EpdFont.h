@@ -1,45 +1,6 @@
 #pragma once
 #include "EpdFontData.h"
 
-// Direct-mapped glyph cache for O(1) lookup of hot glyphs.
-// Reduced from 64 to 16 entries (512 → 128 bytes per font) to recover
-// RAM across the ~15 font instances. Miss cost is one binary search
-// (~10 instructions), invisible at e-ink refresh rates.
-class GlyphCache {
- public:
-  static constexpr int CACHE_SIZE = 16;
-
-  GlyphCache() { clear(); }
-
-  void clear() {
-    for (int i = 0; i < CACHE_SIZE; i++) {
-      entries[i].codepoint = 0xFFFFFFFF;  // Invalid sentinel
-      entries[i].glyph = nullptr;
-    }
-  }
-
-  const EpdGlyph* lookup(uint32_t cp) const {
-    const int idx = cp % CACHE_SIZE;
-    if (entries[idx].codepoint == cp) {
-      return entries[idx].glyph;
-    }
-    return nullptr;
-  }
-
-  void store(uint32_t cp, const EpdGlyph* glyph) {
-    const int idx = cp % CACHE_SIZE;
-    entries[idx].codepoint = cp;
-    entries[idx].glyph = glyph;
-  }
-
- private:
-  struct CacheEntry {
-    uint32_t codepoint;
-    const EpdGlyph* glyph;
-  };
-  CacheEntry entries[CACHE_SIZE];
-};
-
 class EpdFont {
   void getTextBounds(const char* string, int startX, int startY, int* minX, int* minY, int* maxX, int* maxY) const;
 
@@ -48,10 +9,18 @@ class EpdFont {
   explicit EpdFont(const EpdFontData* data) : data(data) {}
   ~EpdFont() = default;
   void getTextDimensions(const char* string, int* w, int* h) const;
-  bool hasPrintableChars(const char* string) const;
 
   const EpdGlyph* getGlyph(uint32_t cp) const;
 
- private:
-  mutable GlyphCache glyphCache;
+  /// Returns the kerning adjustment (4.4 fixed-point in pixels) between two codepoints.
+  /// Returns 0 if no kerning data exists for the pair.
+  int8_t getKerning(uint32_t leftCp, uint32_t rightCp) const;
+
+  /// Returns the ligature codepoint for a pair, or 0 if no ligature exists.
+  uint32_t getLigature(uint32_t leftCp, uint32_t rightCp) const;
+
+  /// Greedily applies ligature substitutions starting from cp, consuming
+  /// as many following codepoints from text as possible. Returns the
+  /// (possibly substituted) codepoint; advances text past consumed chars.
+  uint32_t applyLigatures(uint32_t cp, const char*& text) const;
 };

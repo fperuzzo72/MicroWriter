@@ -1,49 +1,30 @@
-/**
- * Txt.cpp
- *
- * Plain text file handler implementation for SUMI
- */
-
 #include "Txt.h"
 
-#include <CoverHelpers.h>
 #include <FsHelpers.h>
-#include <HardwareSerial.h>
-#include <SDCardManager.h>
+#include <JpegToBmpConverter.h>
+#include <Logging.h>
+#include <PngToBmpConverter.h>
 
-Txt::Txt(std::string filepath, const std::string& cacheDir)
-    : filepath(std::move(filepath)), fileSize(0), loaded(false) {
-  // Create cache key based on filepath (same as Epub/Xtc)
-  cachePath = cacheDir + "/txt_" + std::to_string(std::hash<std::string>{}(this->filepath));
-
-  // Extract title from filename
-  size_t lastSlash = this->filepath.find_last_of('/');
-  size_t lastDot = this->filepath.find_last_of('.');
-
-  if (lastSlash == std::string::npos) {
-    lastSlash = 0;
-  } else {
-    lastSlash++;
-  }
-
-  if (lastDot == std::string::npos || lastDot <= lastSlash) {
-    title = this->filepath.substr(lastSlash);
-  } else {
-    title = this->filepath.substr(lastSlash, lastDot - lastSlash);
-  }
+Txt::Txt(std::string path, std::string cacheBasePath)
+    : filepath(std::move(path)), cacheBasePath(std::move(cacheBasePath)) {
+  // Generate cache path from file path hash
+  const size_t hash = std::hash<std::string>{}(filepath);
+  cachePath = this->cacheBasePath + "/txt_" + std::to_string(hash);
 }
 
 bool Txt::load() {
-  Serial.printf("[%lu] [TXT] Loading TXT: %s\n", millis(), filepath.c_str());
+  if (loaded) {
+    return true;
+  }
 
-  if (!SdMan.exists(filepath.c_str())) {
-    Serial.printf("[%lu] [TXT] File does not exist\n", millis());
+  if (!Storage.exists(filepath.c_str())) {
+    LOG_ERR("TXT", "File does not exist: %s", filepath.c_str());
     return false;
   }
 
   FsFile file;
-  if (!SdMan.openFileForRead("TXT", filepath, file)) {
-    Serial.printf("[%lu] [TXT] Failed to open file\n", millis());
+  if (!Storage.openFileForRead("TXT", filepath, file)) {
+    LOG_ERR("TXT", "Failed to open file: %s", filepath.c_str());
     return false;
   }
 
@@ -51,142 +32,190 @@ bool Txt::load() {
   file.close();
 
   loaded = true;
-  Serial.printf("[%lu] [TXT] Loaded TXT: %s (%zu bytes)\n", millis(), filepath.c_str(), fileSize);
+  LOG_DBG("TXT", "Loaded TXT file: %s (%zu bytes)", filepath.c_str(), fileSize);
   return true;
 }
 
+std::string Txt::getTitle() const {
+  // Extract filename without path and extension
+  size_t lastSlash = filepath.find_last_of('/');
+  std::string filename = (lastSlash != std::string::npos) ? filepath.substr(lastSlash + 1) : filepath;
+
+  // Remove plain text / Markdown extension
+  if (FsHelpers::hasTxtExtension(filename)) {
+    filename = filename.substr(0, filename.length() - 4);
+  } else if (FsHelpers::checkFileExtension(filename, ".markdown")) {
+    filename = filename.substr(0, filename.length() - 9);
+  } else if (FsHelpers::checkFileExtension(filename, ".md")) {
+    filename = filename.substr(0, filename.length() - 3);
+  }
+
+  return filename;
+}
+
+bool Txt::isMarkdown() const { return FsHelpers::hasMarkdownExtension(filepath); }
+
 bool Txt::clearCache() const {
-  if (!SdMan.exists(cachePath.c_str())) {
-    Serial.printf("[%lu] [TXT] Cache does not exist, no action needed\n", millis());
+  if (!Storage.exists(cachePath.c_str())) {
+    LOG_DBG("TXT", "Cache does not exist, no action needed");
     return true;
   }
 
-  if (!SdMan.removeDir(cachePath.c_str())) {
-    Serial.printf("[%lu] [TXT] Failed to clear cache\n", millis());
+  if (!Storage.removeDir(cachePath.c_str())) {
+    LOG_ERR("TXT", "Failed to clear cache");
     return false;
   }
 
-  Serial.printf("[%lu] [TXT] Cache cleared successfully\n", millis());
+  LOG_DBG("TXT", "Cache cleared successfully");
   return true;
 }
 
 void Txt::setupCacheDir() const {
-  if (SdMan.exists(cachePath.c_str())) {
-    return;
+  if (!Storage.exists(cacheBasePath.c_str())) {
+    Storage.mkdir(cacheBasePath.c_str());
+  }
+  if (!Storage.exists(cachePath.c_str())) {
+    Storage.mkdir(cachePath.c_str());
+  }
+}
+
+std::string Txt::findCoverImage() const {
+  // Get the folder containing the txt file
+  size_t lastSlash = filepath.find_last_of('/');
+  std::string folder = (lastSlash != std::string::npos) ? filepath.substr(0, lastSlash) : "";
+  if (folder.empty()) {
+    folder = "/";
   }
 
-  // Create directories recursively
-  for (size_t i = 1; i < cachePath.length(); i++) {
-    if (cachePath[i] == '/') {
-      SdMan.mkdir(cachePath.substr(0, i).c_str());
+  // Get the base filename without extension (e.g., "mybook" from "/books/mybook.txt")
+  std::string baseName = getTitle();
+
+  // Image extensions to try
+  const char* extensions[] = {".bmp", ".jpg", ".jpeg", ".png", ".BMP", ".JPG", ".JPEG", ".PNG"};
+
+  // First priority: look for image with same name as txt file (e.g., mybook.jpg)
+  for (const auto& ext : extensions) {
+    std::string coverPath = folder + "/" + baseName + ext;
+    if (Storage.exists(coverPath.c_str())) {
+      LOG_DBG("TXT", "Found matching cover image: %s", coverPath.c_str());
+      return coverPath;
     }
   }
-  SdMan.mkdir(cachePath.c_str());
+
+  // Fallback: look for cover image files
+  const char* coverNames[] = {"cover", "Cover", "COVER"};
+  for (const auto& name : coverNames) {
+    for (const auto& ext : extensions) {
+      std::string coverPath = folder + "/" + std::string(name) + ext;
+      if (Storage.exists(coverPath.c_str())) {
+        LOG_DBG("TXT", "Found fallback cover image: %s", coverPath.c_str());
+        return coverPath;
+      }
+    }
+  }
+
+  return "";
 }
 
 std::string Txt::getCoverBmpPath() const { return cachePath + "/cover.bmp"; }
 
-std::string Txt::findCoverImage() const {
-  // Extract directory path
-  size_t lastSlash = filepath.find_last_of('/');
-  std::string dirPath = (lastSlash == std::string::npos) ? "/" : filepath.substr(0, lastSlash);
-  if (dirPath.empty()) dirPath = "/";
-
-  return CoverHelpers::findCoverImage(dirPath, title);
-}
-
-bool Txt::generateCoverBmp(bool use1BitDithering) const {
-  const auto coverPath = getCoverBmpPath();
-  const auto failedMarkerPath = cachePath + "/.cover.failed";
-
-  // Already generated
-  if (SdMan.exists(coverPath.c_str())) {
+bool Txt::generateCoverBmp() const {
+  // Already generated, return true
+  if (Storage.exists(getCoverBmpPath().c_str())) {
     return true;
   }
 
-  // Previously failed, don't retry
-  if (SdMan.exists(failedMarkerPath.c_str())) {
-    return false;
-  }
-
-  // Find a cover image
   std::string coverImagePath = findCoverImage();
   if (coverImagePath.empty()) {
-    Serial.printf("[%lu] [TXT] No cover image found\n", millis());
-    // Create failure marker
-    FsFile marker;
-    if (SdMan.openFileForWrite("TXT", failedMarkerPath, marker)) {
-      marker.close();
-    }
+    LOG_DBG("TXT", "No cover image found for TXT file");
     return false;
   }
 
   // Setup cache directory
   setupCacheDir();
 
-  // Convert to BMP using shared helper
-  const bool success = CoverHelpers::convertImageToBmp(coverImagePath, coverPath, "TXT", use1BitDithering);
-  if (!success) {
-    // Create failure marker
-    FsFile marker;
-    if (SdMan.openFileForWrite("TXT", failedMarkerPath, marker)) {
-      marker.close();
+  if (FsHelpers::hasBmpExtension(coverImagePath)) {
+    // Copy BMP file to cache
+    LOG_DBG("TXT", "Copying BMP cover image to cache");
+    FsFile src, dst;
+    if (!Storage.openFileForRead("TXT", coverImagePath, src)) {
+      return false;
     }
+    if (!Storage.openFileForWrite("TXT", getCoverBmpPath(), dst)) {
+      return false;
+    }
+    uint8_t buffer[1024];
+    while (src.available()) {
+      size_t bytesRead = src.read(buffer, sizeof(buffer));
+      dst.write(buffer, bytesRead);
+    }
+    src.close();
+    dst.close();
+    LOG_DBG("TXT", "Copied BMP cover to cache");
+    return true;
+  } else if (FsHelpers::hasJpgExtension(coverImagePath)) {
+    // Convert JPG/JPEG to BMP (same approach as Epub)
+    LOG_DBG("TXT", "Generating BMP from JPG cover image");
+    FsFile coverJpg, coverBmp;
+    if (!Storage.openFileForRead("TXT", coverImagePath, coverJpg)) {
+      return false;
+    }
+    if (!Storage.openFileForWrite("TXT", getCoverBmpPath(), coverBmp)) {
+      coverJpg.close();
+      return false;
+    }
+    const bool success = JpegToBmpConverter::jpegFileToBmpStream(coverJpg, coverBmp);
+    coverJpg.close();
+    coverBmp.close();
+
+    if (!success) {
+      LOG_ERR("TXT", "Failed to generate BMP from JPG cover image");
+      Storage.remove(getCoverBmpPath().c_str());
+    } else {
+      LOG_DBG("TXT", "Generated BMP from JPG cover image");
+    }
+    return success;
+  } else if (FsHelpers::hasPngExtension(coverImagePath)) {
+    LOG_DBG("TXT", "Generating BMP from PNG cover image");
+    FsFile coverPng, coverBmp;
+    if (!Storage.openFileForRead("TXT", coverImagePath, coverPng)) {
+      return false;
+    }
+    if (!Storage.openFileForWrite("TXT", getCoverBmpPath(), coverBmp)) {
+      coverPng.close();
+      return false;
+    }
+    const bool success = PngToBmpConverter::pngFileToBmpStream(coverPng, coverBmp);
+    coverPng.close();
+    coverBmp.close();
+
+    if (!success) {
+      LOG_ERR("TXT", "Failed to generate BMP from PNG cover image");
+      Storage.remove(getCoverBmpPath().c_str());
+    } else {
+      LOG_DBG("TXT", "Generated BMP from PNG cover image");
+    }
+    return success;
   }
-  return success;
+
+  LOG_ERR("TXT", "Cover image format not supported (only BMP/JPG/JPEG/PNG)");
+  return false;
 }
 
-std::string Txt::getThumbBmpPath() const { return cachePath + "/thumb.bmp"; }
-
-bool Txt::generateThumbBmp() const {
-  const auto thumbPath = getThumbBmpPath();
-  const auto failedMarkerPath = cachePath + "/.thumb.failed";
-
-  if (SdMan.exists(thumbPath.c_str())) return true;
-
-  // Previously failed, don't retry
-  if (SdMan.exists(failedMarkerPath.c_str())) {
-    return false;
-  }
-
-  if (!SdMan.exists(getCoverBmpPath().c_str()) && !generateCoverBmp(true)) {
-    // Create failure marker
-    FsFile marker;
-    if (SdMan.openFileForWrite("TXT", failedMarkerPath, marker)) {
-      marker.close();
-    }
-    return false;
-  }
-
-  setupCacheDir();
-
-  const bool success = CoverHelpers::generateThumbFromCover(getCoverBmpPath(), thumbPath, "TXT");
-  if (!success) {
-    // Create failure marker
-    FsFile marker;
-    if (SdMan.openFileForWrite("TXT", failedMarkerPath, marker)) {
-      marker.close();
-    }
-  }
-  return success;
-}
-
-size_t Txt::readContent(uint8_t* buffer, size_t offset, size_t length) const {
+bool Txt::readContent(uint8_t* buffer, size_t offset, size_t length) const {
   if (!loaded) {
-    return 0;
+    return false;
   }
 
   FsFile file;
-  if (!SdMan.openFileForRead("TXT", filepath, file)) {
-    return 0;
+  if (!Storage.openFileForRead("TXT", filepath, file)) {
+    return false;
   }
 
-  if (offset > 0) {
-    file.seek(offset);
+  if (!file.seek(offset)) {
+    return false;
   }
 
-  // FsFile::read returns int — clamp -1 to 0 so callers never see SIZE_MAX.
-  const int rawRead = file.read(buffer, length);
-  file.close();
-  return rawRead > 0 ? static_cast<size_t>(rawRead) : 0;
+  size_t bytesRead = file.read(buffer, length);
+  return bytesRead > 0;
 }

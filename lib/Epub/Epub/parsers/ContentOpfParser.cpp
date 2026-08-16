@@ -1,59 +1,41 @@
 #include "ContentOpfParser.h"
 
 #include <FsHelpers.h>
-#include <HardwareSerial.h>
+#include <Logging.h>
 #include <Serialization.h>
+#include <XmlParserUtils.h>
+
+#include <cctype>
 
 #include "../BookMetadataCache.h"
 
 namespace {
 constexpr char MEDIA_TYPE_NCX[] = "application/x-dtbncx+xml";
+constexpr char MEDIA_TYPE_CSS[] = "text/css";
+constexpr char MEDIA_TYPE_IMAGE_PREFIX[] = "image/";
 constexpr char itemCacheFile[] = "/.items.bin";
 
-// Find the last valid UTF-8 boundary within maxLen bytes
-// Returns the safe length to use for truncation (may be less than maxLen)
-size_t findUtf8Boundary(const char* s, size_t maxLen) {
-  if (maxLen == 0) return 0;
-
-  // Work backwards from maxLen to find a valid boundary
-  size_t pos = maxLen;
-  while (pos > 0) {
-    const unsigned char c = static_cast<unsigned char>(s[pos - 1]);
-    // If this byte is ASCII or a UTF-8 start byte, previous position is safe
-    if (c < 0x80 || c >= 0xC0) {
-      // Previous char ended cleanly at pos-1, so pos is a valid boundary
-      // But we need to check if we're in the middle of a multi-byte sequence
-      if (c < 0x80) {
-        return pos;  // ASCII byte, safe to cut after it
-      }
-      // This is a UTF-8 start byte - don't cut before it completes
-      // Check if the full character fits
-      size_t charLen = 1;
-      if ((c & 0xE0) == 0xC0)
-        charLen = 2;
-      else if ((c & 0xF0) == 0xE0)
-        charLen = 3;
-      else if ((c & 0xF8) == 0xF0)
-        charLen = 4;
-
-      if (pos - 1 + charLen <= maxLen) {
-        return pos - 1 + charLen;  // Full character fits
-      }
-      // Character doesn't fit, try earlier
-      pos--;
-      continue;
-    }
-    // Continuation byte (0x80-0xBF), keep going back
-    pos--;
+bool startsWithImageMediaType(const std::string& mediaType) {
+  constexpr size_t prefixLen = sizeof(MEDIA_TYPE_IMAGE_PREFIX) - 1;
+  if (mediaType.size() < prefixLen) {
+    return false;
   }
-  return 0;
+
+  for (size_t i = 0; i < prefixLen; ++i) {
+    const char c = static_cast<char>(std::tolower(static_cast<unsigned char>(mediaType[i])));
+    if (c != MEDIA_TYPE_IMAGE_PREFIX[i]) {
+      return false;
+    }
+  }
+
+  return true;
 }
 }  // namespace
 
 bool ContentOpfParser::setup() {
   parser = XML_ParserCreate(nullptr);
   if (!parser) {
-    Serial.printf("[%lu] [COF] Couldn't allocate memory for parser\n", millis());
+    LOG_DBG("COF", "Couldn't allocate memory for parser");
     return false;
   }
 
@@ -64,18 +46,13 @@ bool ContentOpfParser::setup() {
 }
 
 ContentOpfParser::~ContentOpfParser() {
-  if (parser) {
-    XML_StopParser(parser, XML_FALSE);                // Stop any pending processing
-    XML_SetElementHandler(parser, nullptr, nullptr);  // Clear callbacks
-    XML_SetCharacterDataHandler(parser, nullptr);
-    XML_ParserFree(parser);
-    parser = nullptr;
-  }
+  destroyXmlParser(parser);
   if (tempItemStore) {
     tempItemStore.close();
   }
-  if (SdMan.exists((cachePath + itemCacheFile).c_str())) {
-    SdMan.remove((cachePath + itemCacheFile).c_str());
+  const auto itemCachePath = cachePath + itemCacheFile;
+  if (Storage.exists(itemCachePath.c_str())) {
+    Storage.remove(itemCachePath.c_str());
   }
 }
 
@@ -91,12 +68,8 @@ size_t ContentOpfParser::write(const uint8_t* buffer, const size_t size) {
     void* const buf = XML_GetBuffer(parser, 1024);
 
     if (!buf) {
-      Serial.printf("[%lu] [COF] Couldn't allocate memory for buffer\n", millis());
-      XML_StopParser(parser, XML_FALSE);                // Stop any pending processing
-      XML_SetElementHandler(parser, nullptr, nullptr);  // Clear callbacks
-      XML_SetCharacterDataHandler(parser, nullptr);
-      XML_ParserFree(parser);
-      parser = nullptr;
+      LOG_ERR("COF", "Couldn't allocate memory for buffer");
+      destroyXmlParser(parser);
       return 0;
     }
 
@@ -104,13 +77,9 @@ size_t ContentOpfParser::write(const uint8_t* buffer, const size_t size) {
     memcpy(buf, currentBufferPos, toRead);
 
     if (XML_ParseBuffer(parser, static_cast<int>(toRead), remainingSize == toRead) == XML_STATUS_ERROR) {
-      Serial.printf("[%lu] [COF] Parse error at line %lu: %s\n", millis(), XML_GetCurrentLineNumber(parser),
-                    XML_ErrorString(XML_GetErrorCode(parser)));
-      XML_StopParser(parser, XML_FALSE);                // Stop any pending processing
-      XML_SetElementHandler(parser, nullptr, nullptr);  // Clear callbacks
-      XML_SetCharacterDataHandler(parser, nullptr);
-      XML_ParserFree(parser);
-      parser = nullptr;
+      LOG_DBG("COF", "Parse error at line %lu: %s", XML_GetCurrentLineNumber(parser),
+              XML_ErrorString(XML_GetErrorCode(parser)));
+      destroyXmlParser(parser);
       return 0;
     }
 
@@ -137,17 +106,15 @@ void XMLCALL ContentOpfParser::startElement(void* userData, const XML_Char* name
   }
 
   if (self->state == IN_METADATA && strcmp(name, "dc:title") == 0) {
-    self->state = IN_BOOK_TITLE;
+    // Only capture the first dc:title element; subsequent ones are subtitles
+    if (self->title.empty()) {
+      self->state = IN_BOOK_TITLE;
+    }
     return;
   }
 
   if (self->state == IN_METADATA && strcmp(name, "dc:creator") == 0) {
     self->state = IN_BOOK_AUTHOR;
-    return;
-  }
-
-  if (self->state == IN_METADATA && strcmp(name, "dc:subject") == 0) {
-    self->state = IN_BOOK_SUBJECT;
     return;
   }
 
@@ -158,35 +125,38 @@ void XMLCALL ContentOpfParser::startElement(void* userData, const XML_Char* name
 
   if (self->state == IN_PACKAGE && (strcmp(name, "manifest") == 0 || strcmp(name, "opf:manifest") == 0)) {
     self->state = IN_MANIFEST;
-    if (!SdMan.openFileForWrite("COF", self->cachePath + itemCacheFile, self->tempItemStore)) {
-      Serial.printf(
-          "[%lu] [COF] Couldn't open temp items file for writing. This is probably going to be a fatal error.\n",
-          millis());
+    if (!Storage.openFileForWrite("COF", self->cachePath + itemCacheFile, self->tempItemStore)) {
+      LOG_ERR("COF", "Couldn't open temp items file for writing. This is probably going to be a fatal error.");
     }
     return;
   }
 
   if (self->state == IN_PACKAGE && (strcmp(name, "spine") == 0 || strcmp(name, "opf:spine") == 0)) {
     self->state = IN_SPINE;
-    // Open the temp items file for on-demand streaming lookup during the
-    // spine walk. The older design built an in-memory unordered_map of
-    // every manifest entry, which blew bad_alloc on huge EPUBs like War
-    // and Peace (500+ manifest items = ~35 KB of hash nodes + strings +
-    // rehash buckets on a fragmented heap). Streaming means we re-seek
-    // to offset 0 for each spine idref and scan linearly for the match.
-    // O(N*M) but both N and M are bounded; one full spine parse of W&P
-    // does ~100K byte reads, ~0.5 s on SD — invisible vs the full EPUB
-    // cache-build phase.
-    if (!SdMan.openFileForRead("COF", self->cachePath + itemCacheFile, self->tempItemStore)) {
-      Serial.printf(
-          "[%lu] [COF] Couldn't open temp items file. Spine will have no hrefs.\n",
-          millis());
+    if (!Storage.openFileForRead("COF", self->cachePath + itemCacheFile, self->tempItemStore)) {
+      LOG_ERR("COF", "Couldn't open temp items file for reading. This is probably going to be a fatal error.");
+    }
+
+    // Sort the (unconditionally-built) item index so every idref lookup uses binary
+    // search. Without this, small/medium manifests fell back to an O(spine × manifest)
+    // linear rescan of .items.bin per itemref (up to ~200ms/item at large scale).
+    if (!self->itemIndex.empty()) {
+      std::sort(self->itemIndex.begin(), self->itemIndex.end(), [](const ItemIndexEntry& a, const ItemIndexEntry& b) {
+        return a.idHash < b.idHash || (a.idHash == b.idHash && a.idLen < b.idLen);
+      });
+      self->useItemIndex = true;
+      LOG_DBG("COF", "Using fast index for %zu manifest items", self->itemIndex.size());
     }
     return;
   }
 
   if (self->state == IN_PACKAGE && (strcmp(name, "guide") == 0 || strcmp(name, "opf:guide") == 0)) {
     self->state = IN_GUIDE;
+    // TODO Remove print
+    LOG_DBG("COF", "Entering guide state.");
+    if (!Storage.openFileForRead("COF", self->cachePath + itemCacheFile, self->tempItemStore)) {
+      LOG_ERR("COF", "Couldn't open temp items file for reading. This is probably going to be a fatal error.");
+    }
     return;
   }
 
@@ -218,7 +188,7 @@ void XMLCALL ContentOpfParser::startElement(void* userData, const XML_Char* name
       if (strcmp(atts[i], "id") == 0) {
         itemId = atts[i + 1];
       } else if (strcmp(atts[i], "href") == 0) {
-        href = FsHelpers::normalisePath(self->baseContentPath + atts[i + 1]);
+        href = FsHelpers::normalisePath(FsHelpers::decodeUriEscapes(self->baseContentPath + atts[i + 1]));
       } else if (strcmp(atts[i], "media-type") == 0) {
         mediaType = atts[i + 1];
       } else if (strcmp(atts[i], "properties") == 0) {
@@ -226,21 +196,41 @@ void XMLCALL ContentOpfParser::startElement(void* userData, const XML_Char* name
       }
     }
 
+    // Record index entry for fast lookup later
+    if (self->tempItemStore) {
+      ItemIndexEntry entry;
+      entry.idHash = fnvHash(itemId);
+      entry.idLen = static_cast<uint16_t>(itemId.size());
+      entry.fileOffset = static_cast<uint32_t>(self->tempItemStore.position());
+      self->itemIndex.push_back(entry);
+    }
+
     // Write items down to SD card
     serialization::writeString(self->tempItemStore, itemId);
     serialization::writeString(self->tempItemStore, href);
 
     if (itemId == self->coverItemId) {
-      self->coverItemHref = href;
+      // Some EPUBs set meta name="cover" to an XHTML wrapper item.
+      // Only treat it as a cover image when the manifest media-type is image/*.
+      if (startsWithImageMediaType(mediaType)) {
+        self->coverItemHref = href;
+      } else {
+        LOG_DBG("COF", "Ignoring meta cover item '%s' with non-image media type: %s", itemId.c_str(),
+                mediaType.c_str());
+      }
     }
 
     if (mediaType == MEDIA_TYPE_NCX) {
       if (self->tocNcxPath.empty()) {
         self->tocNcxPath = href;
       } else {
-        Serial.printf("[%lu] [COF] Warning: Multiple NCX files found in manifest. Ignoring duplicate: %s\n", millis(),
-                      href.c_str());
+        LOG_DBG("COF", "Warning: Multiple NCX files found in manifest. Ignoring duplicate: %s", href.c_str());
       }
+    }
+
+    // Collect CSS files
+    if (mediaType == MEDIA_TYPE_CSS) {
+      self->cssFiles.push_back(href);
     }
 
     // EPUB 3: Check for nav document (properties contains "nav")
@@ -248,23 +238,16 @@ void XMLCALL ContentOpfParser::startElement(void* userData, const XML_Char* name
       // Properties is space-separated, check if "nav" is present as a word
       if (properties == "nav" || properties.find("nav ") == 0 || properties.find(" nav") != std::string::npos) {
         self->tocNavPath = href;
-        Serial.printf("[%lu] [COF] Found EPUB 3 nav document: %s\n", millis(), href.c_str());
+        LOG_DBG("COF", "Found EPUB 3 nav document: %s", href.c_str());
       }
     }
 
-    // EPUB 3: Check for cover-image property (overrides EPUB 2 meta if present)
-    if (!properties.empty() && FsHelpers::isImageFile(href)) {
+    // EPUB 3: Check for cover image (properties contains "cover-image")
+    if (!properties.empty() && self->coverItemHref.empty()) {
       if (properties == "cover-image" || properties.find("cover-image ") == 0 ||
           properties.find(" cover-image") != std::string::npos) {
         self->coverItemHref = href;
-        Serial.printf("[%lu] [COF] Found EPUB 3 cover-image: %s\n", millis(), href.c_str());
       }
-    }
-
-    // Collect CSS files
-    if (mediaType == "text/css") {
-      self->cssFiles_.push_back(href);
-      Serial.printf("[%lu] [COF] Found CSS file: %s\n", millis(), href.c_str());
     }
     return;
   }
@@ -276,23 +259,49 @@ void XMLCALL ContentOpfParser::startElement(void* userData, const XML_Char* name
       for (int i = 0; atts[i]; i += 2) {
         if (strcmp(atts[i], "idref") == 0) {
           const std::string idref = atts[i + 1];
-          // Streaming lookup: rewind the temp items file and scan for a
-          // matching id. We don't hold a 500-entry hash map in RAM —
-          // trades ~0.5 s of SD reads for being able to open 1000-item
-          // EPUBs on a 63 KB heap. See the spine-open site above.
-          if (!self->tempItemStore) break;
-          self->tempItemStore.seek(0);
-          std::string candidateId;
-          std::string candidateHref;
-          while (self->tempItemStore.available()) {
-            if (!serialization::readString(self->tempItemStore, candidateId) ||
-                !serialization::readString(self->tempItemStore, candidateHref)) {
-              break;
+          std::string href;
+          bool found = false;
+
+          if (self->useItemIndex) {
+            // Fast path: binary search
+            uint32_t targetHash = fnvHash(idref);
+            uint16_t targetLen = static_cast<uint16_t>(idref.size());
+
+            auto it = std::lower_bound(self->itemIndex.begin(), self->itemIndex.end(),
+                                       ItemIndexEntry{targetHash, targetLen, 0},
+                                       [](const ItemIndexEntry& a, const ItemIndexEntry& b) {
+                                         return a.idHash < b.idHash || (a.idHash == b.idHash && a.idLen < b.idLen);
+                                       });
+
+            // Check for match (may need to check a few due to hash collisions)
+            while (it != self->itemIndex.end() && it->idHash == targetHash) {
+              self->tempItemStore.seek(it->fileOffset);
+              std::string itemId;
+              serialization::readString(self->tempItemStore, itemId);
+              if (itemId == idref) {
+                serialization::readString(self->tempItemStore, href);
+                found = true;
+                break;
+              }
+              ++it;
             }
-            if (candidateId == idref) {
-              self->cache->createSpineEntry(candidateHref);
-              break;
+          } else {
+            // Fallback linear scan, only reached when the index is empty (no manifest
+            // items). The fast binary-search path above is used for all real manifests.
+            self->tempItemStore.seek(0);
+            std::string itemId;
+            while (self->tempItemStore.available()) {
+              serialization::readString(self->tempItemStore, itemId);
+              serialization::readString(self->tempItemStore, href);
+              if (itemId == idref) {
+                found = true;
+                break;
+              }
             }
+          }
+
+          if (found && self->cache) {
+            self->cache->createSpineEntry(href);
           }
         }
       }
@@ -302,23 +311,22 @@ void XMLCALL ContentOpfParser::startElement(void* userData, const XML_Char* name
   // parse the guide
   if (self->state == IN_GUIDE && (strcmp(name, "reference") == 0 || strcmp(name, "opf:reference") == 0)) {
     std::string type;
-    std::string textHref;
+    std::string guideHref;
     for (int i = 0; atts[i]; i += 2) {
       if (strcmp(atts[i], "type") == 0) {
         type = atts[i + 1];
-        if (type == "text" || type == "start") {
-          continue;
-        } else {
-          Serial.printf("[%lu] [COF] Skipping non-text reference in guide: %s\n", millis(), type.c_str());
-          break;
-        }
       } else if (strcmp(atts[i], "href") == 0) {
-        textHref = FsHelpers::normalisePath(self->baseContentPath + atts[i + 1]);
+        guideHref = FsHelpers::normalisePath(FsHelpers::decodeUriEscapes(self->baseContentPath + atts[i + 1]));
       }
     }
-    if ((type == "text" || (type == "start" && !self->textReferenceHref.empty())) && (textHref.length() > 0)) {
-      Serial.printf("[%lu] [COF] Found %s reference in guide: %s.\n", millis(), type.c_str(), textHref.c_str());
-      self->textReferenceHref = textHref;
+    if (!guideHref.empty()) {
+      if (type == "text" || (type == "start" && !self->textReferenceHref.empty())) {
+        LOG_DBG("COF", "Found %s reference in guide: %s", type.c_str(), guideHref.c_str());
+        self->textReferenceHref = guideHref;
+      } else if ((type == "cover" || type == "cover-page") && self->guideCoverPageHref.empty()) {
+        LOG_DBG("COF", "Found cover reference in guide: %s", guideHref.c_str());
+        self->guideCoverPageHref = guideHref;
+      }
     }
     return;
   }
@@ -328,50 +336,20 @@ void XMLCALL ContentOpfParser::characterData(void* userData, const XML_Char* s, 
   auto* self = static_cast<ContentOpfParser*>(userData);
 
   if (self->state == IN_BOOK_TITLE) {
-    if (self->title.size() + static_cast<size_t>(len) <= MAX_TITLE_LENGTH) {
-      self->title.append(s, len);
-    } else if (self->title.size() < MAX_TITLE_LENGTH) {
-      const size_t remaining = MAX_TITLE_LENGTH - self->title.size();
-      const size_t safeLen = findUtf8Boundary(s, remaining);
-      if (safeLen > 0) {
-        self->title.append(s, safeLen);
-      }
-      Serial.printf("[COF] Title truncated at %zu bytes\n", self->title.size());
-    }
+    self->title.append(s, len);
     return;
   }
 
   if (self->state == IN_BOOK_AUTHOR) {
-    if (self->author.size() + static_cast<size_t>(len) <= MAX_AUTHOR_LENGTH) {
-      self->author.append(s, len);
-    } else if (self->author.size() < MAX_AUTHOR_LENGTH) {
-      const size_t remaining = MAX_AUTHOR_LENGTH - self->author.size();
-      const size_t safeLen = findUtf8Boundary(s, remaining);
-      if (safeLen > 0) {
-        self->author.append(s, safeLen);
-      }
-      Serial.printf("[COF] Author truncated at %zu bytes\n", self->author.size());
+    if (!self->author.empty()) {
+      self->author.append(", ");  // Add separator for multiple authors
     }
-    return;
-  }
-
-  if (self->state == IN_BOOK_SUBJECT) {
-    // Only capture first dc:subject that starts with "sumi:" — ignore others
-    if (self->subject.empty()) {
-      std::string candidate(s, len);
-      if (candidate.rfind("sumi:", 0) == 0 && candidate.size() <= MAX_SUBJECT_LENGTH) {
-        self->subject = candidate;
-        Serial.printf("[COF] Found sumi subject hint: %s\n", self->subject.c_str());
-      }
-    }
+    self->author.append(s, len);
     return;
   }
 
   if (self->state == IN_BOOK_LANGUAGE) {
-    // Capture first dc:language tag (BCP-47, e.g. "en", "en-US", "fr")
-    if (self->language.empty() && len > 0) {
-      self->language.append(s, len);
-    }
+    self->language.append(s, len);
     return;
   }
 }
@@ -382,27 +360,19 @@ void XMLCALL ContentOpfParser::endElement(void* userData, const XML_Char* name) 
 
   if (self->state == IN_SPINE && (strcmp(name, "spine") == 0 || strcmp(name, "opf:spine") == 0)) {
     self->state = IN_PACKAGE;
-    // Release the temp items file handle now that spine walking is done.
-    if (self->tempItemStore) {
-      self->tempItemStore.close();
-    }
+    self->tempItemStore.close();
     return;
   }
 
   if (self->state == IN_GUIDE && (strcmp(name, "guide") == 0 || strcmp(name, "opf:guide") == 0)) {
     self->state = IN_PACKAGE;
+    self->tempItemStore.close();
     return;
   }
 
   if (self->state == IN_MANIFEST && (strcmp(name, "manifest") == 0 || strcmp(name, "opf:manifest") == 0)) {
     self->state = IN_PACKAGE;
-    // syncAndClose: the temp items file is re-opened a few calls later
-    // (when we hit the spine) and scanned through to build manifestIndex.
-    // Without sync, SdFat can drop the tail sectors of the just-written
-    // manifest, which would silently return an empty index and cascade
-    // into an empty spine — the reader then fails to open the book
-    // with a confusing "No content" error.
-    SdMan.syncAndClose(self->tempItemStore);
+    self->tempItemStore.close();
     return;
   }
 
@@ -412,11 +382,6 @@ void XMLCALL ContentOpfParser::endElement(void* userData, const XML_Char* name) 
   }
 
   if (self->state == IN_BOOK_AUTHOR && strcmp(name, "dc:creator") == 0) {
-    self->state = IN_METADATA;
-    return;
-  }
-
-  if (self->state == IN_BOOK_SUBJECT && strcmp(name, "dc:subject") == 0) {
     self->state = IN_METADATA;
     return;
   }

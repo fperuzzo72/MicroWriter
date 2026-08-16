@@ -1,26 +1,29 @@
 #pragma once
 
-#include <EInkDisplay.h>
 #include <EpdFontFamily.h>
-#include <ThaiCluster.h>
+#include <HalDisplay.h>
 
-#include <array>
-#include <deque>
+class FontCacheManager;
+class SdCardFont;
+
+#include <cstring>
 #include <map>
-#include <unordered_map>
+#include <string>
 #include <vector>
 
 #include "Bitmap.h"
 
-#ifdef ARDUINO
-#include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
-#endif
-
-// Forward declaration for external CJK font support
-class ExternalFont;
-// Forward declaration for streaming font support
-class StreamingEpdFont;
+// Color representation: uint8_t mapped to 4x4 Bayer matrix dithering levels
+// 0 = transparent, 1-16 = gray levels (white to black)
+enum Color : uint8_t {
+  Clear = 0x00,
+  White = 0x01,
+  LightGray = 0x05,
+  MediumGray = 0x07,
+  DarkGray = 0x0A,
+  ExtraDarkGray = 0x0D,
+  Black = 0x10
+};
 
 class GfxRenderer {
  public:
@@ -35,239 +38,139 @@ class GfxRenderer {
   };
 
  private:
-  // 8KB chunks to allow for non-contiguous memory allocation. Sized for
-  // MAX_BUFFER_SIZE (52272 bytes for X3) so one set of chunks works for both
-  // panels. 7 chunks × 8000 = 56000 bytes; X3 uses 52272, X4 uses 48000, the
-  // remainder is wasted but the chunk allocation pattern stays simple.
-  static constexpr size_t BW_BUFFER_CHUNK_SIZE = 8000;
-  static constexpr size_t BW_BUFFER_NUM_CHUNKS = 7;
-  static_assert(BW_BUFFER_CHUNK_SIZE * BW_BUFFER_NUM_CHUNKS >= EInkDisplay::MAX_BUFFER_SIZE,
-                "BW buffer chunks too small for MAX_BUFFER_SIZE");
+  static constexpr size_t BW_BUFFER_CHUNK_SIZE = 8000;  // 8KB chunks to allow for non-contiguous memory
 
-  EInkDisplay& einkDisplay;
+  HalDisplay& display;
   RenderMode renderMode;
   Orientation orientation;
+  bool fadingFix;
+  bool darkMode;
+  uint8_t textDarkness = 0;  // 0=normal, 1=crisp, 2=dark, 3=extra dark
   uint8_t* frameBuffer = nullptr;
-  uint8_t* bwBufferChunks[BW_BUFFER_NUM_CHUNKS] = {nullptr};
+  uint16_t panelWidth = HalDisplay::DISPLAY_WIDTH;
+  uint16_t panelHeight = HalDisplay::DISPLAY_HEIGHT;
+  uint16_t panelWidthBytes = HalDisplay::DISPLAY_WIDTH_BYTES;
+  uint32_t frameBufferSize = HalDisplay::BUFFER_SIZE;
+  std::vector<uint8_t*> bwBufferChunks;
   std::map<int, EpdFontFamily> fontMap;
-  // Streaming fonts: [fontId] -> array of [REGULAR, BOLD, ITALIC] (BOLD_ITALIC uses BOLD)
-  // Mutable: getStreamingFont may trigger lazy loading of bold/italic variants via resolver
-  mutable std::map<int, std::array<StreamingEpdFont*, 3>> _streamingFonts;
-  ExternalFont* _externalFont = nullptr;
+  mutable std::map<int, SdCardFont*> sdCardFonts_;
+  mutable bool nextRefreshOverridePending = false;
+  mutable HalDisplay::RefreshMode nextRefreshOverride = HalDisplay::FAST_REFRESH;
 
-  // Lazy font style resolver: called when a streaming font variant (bold/italic) is
-  // requested but not yet loaded. The callback should load the variant and call
-  // setStreamingFont() + updateFontFamily() to register it.
-  using FontStyleResolver = void (*)(void* ctx, int fontId, int styleIdx);
-  mutable FontStyleResolver _fontStyleResolver = nullptr;
-  mutable void* _fontStyleResolverCtx = nullptr;
+  // Tiled grayscale strip target. When active, drawPixel()/clearScreen()
+  // operate on a caller-owned scratch holding physical rows
+  // [_stripY0, _stripY0 + _stripRows) instead of the shared framebuffer.
+  mutable uint8_t* _stripBuf = nullptr;
+  mutable int _stripY0 = 0;
+  mutable int _stripRows = 0;
+  mutable bool _stripActive = false;
 
-  // Pre-allocated row buffers for bitmap rendering (reduces heap fragmentation).
-  // Sized for the LARGER of X4 (800) and X3 (792) panel widths; X3 uses the
-  // buffer but leaves 8 pixels unused per row (negligible).
-  // outputRow = 800/4 = 200 bytes, rowBytes = 800*4 = 3200 bytes (32-bit max).
-  static constexpr size_t BITMAP_MAX_WIDTH =
-      (EInkDisplay::DISPLAY_WIDTH > EInkDisplay::X3_DISPLAY_WIDTH) ? EInkDisplay::DISPLAY_WIDTH
-                                                                  : EInkDisplay::X3_DISPLAY_WIDTH;
-  static constexpr size_t BITMAP_OUTPUT_ROW_SIZE = (BITMAP_MAX_WIDTH + 3) / 4;
-  static constexpr size_t BITMAP_ROW_BYTES_SIZE = BITMAP_MAX_WIDTH * 4;
-  uint8_t* bitmapOutputRow_ = nullptr;
-  uint8_t* bitmapRowBytes_ = nullptr;
-  bool bitmapRowsOwnMemory_ = false;
-  void allocateBitmapRowBuffers();
-  void freeBitmapRowBuffers();
+  // Mutable because drawText() is const but needs to delegate scan-mode
+  // recording to the (non-const) FontCacheManager. Same pragmatic compromise
+  // as before, concentrated in a single pointer instead of four fields.
+  mutable FontCacheManager* fontCacheManager_ = nullptr;
 
-  // Periodic refresh counter — auto-promotes FAST_REFRESH to HALF_REFRESH
-  // every N fast refreshes to clear accumulated e-ink ghosting.
-  // Mutable: display policy state, not renderer content state.
-  mutable int periodicRefreshInterval_ = 0;  // 0 = disabled (Reader manages its own)
-  mutable int fastRefreshCount_ = 0;
-
-  // Sunlight fading fix — power off display after each refresh
-  bool fadingFix_ = false;
-
-  // Text darkness: controls AA intensity for 2-bit font glyphs
-  // 0=Normal (true 4-level), 1=Dark, 2=Extra Dark, 3=Maximum (1-bit, no AA)
-  uint8_t textDarkness_ = 0;
-
-  // Word width cache for performance optimization during EPUB section creation.
-  // Key: FNV-1a hash of (fontId, text, style). Value: measured width in pixels.
-  // Limited to MAX_WIDTH_CACHE_SIZE entries to prevent heap fragmentation.
-  //
-  // Value type was int16_t pre-Batch-7. A long Arabic ligature or a CJK
-  // string with extra-wide AA spacing can measure past 32767 pixels —
-  // the int16_t cast wrapped negative and the cache returned a phantom
-  // negative width that subsequent layout used as an offset, producing
-  // overlapping or off-screen text. int32_t fits any plausible
-  // pixel-width on this hardware (panel max ~800 px, cache holds whole
-  // rendered runs that can be many panels wide). 4-byte values vs 2-byte
-  // cost ~512 B at MAX_WIDTH_CACHE_SIZE=256; that's a worthy trade.
-  // Audit #34.
-  static constexpr size_t MAX_WIDTH_CACHE_SIZE = 256;
-  mutable std::unordered_map<uint64_t, int32_t> wordWidthCache;
-  // FIFO insertion order, used for eviction. When the map hits
-  // MAX_WIDTH_CACHE_SIZE the oldest entry (front of deque) is dropped
-  // — instead of the previous `cache.clear()` which trashed all 256
-  // entries on every overflow. EPUB layout regularly measures hundreds
-  // of unique words per page; the bulk-clear meant every page paid the
-  // full measurement cost. FIFO eviction keeps the most recent N
-  // entries warm and the typical hit rate climbs from ~0% to ~30-50%.
-  // Audit #42.
-  //
-  // We use FIFO rather than true LRU: a hit doesn't promote the entry
-  // to the back. The access pattern (a single layout pass walks ~50
-  // words once, then moves on) makes LRU promotion ~free in benefit
-  // for a measurable cost (deque-find on every hit). Pure FIFO is
-  // both cheaper and observationally similar.
-  mutable std::deque<uint64_t> wordWidthOrder;
-
-  uint64_t makeWidthCacheKey(int fontId, const char* text, EpdFontFamily::Style style) const {
-    // FNV-1a hash
-    uint64_t hash = 14695981039346656037ULL;
-    hash ^= static_cast<uint64_t>(fontId);
-    hash *= 1099511628211ULL;
-    hash ^= static_cast<uint64_t>(style);
-    hash *= 1099511628211ULL;
-    if (text) {
-      while (*text) {
-        hash ^= static_cast<uint8_t>(*text++);
-        hash *= 1099511628211ULL;
-      }
-    }
-    return hash;
-  }
-
-  void renderChar(const EpdFontFamily& fontFamily, uint32_t cp, int* x, const int* y, bool pixelState,
-                  EpdFontFamily::Style style, int fontId) const;
-  void renderThaiCluster(const EpdFontFamily& fontFamily, const ThaiShaper::ThaiCluster& cluster, int* x, int y,
-                         bool pixelState, EpdFontFamily::Style style, int fontId) const;
-  void renderExternalGlyph(uint32_t cp, int* x, int y, bool pixelState) const;
-  int getExternalGlyphWidth(uint32_t cp) const;
+  void renderChar(const EpdFontFamily& fontFamily, uint32_t cp, int* x, int* y, bool pixelState,
+                  EpdFontFamily::Style style) const;
+  void drawPixelRaw(int x, int y, bool state) const;
   void freeBwBufferChunks();
-
-  // Concurrency check helper. Logs (rate-limited) when a renderer method
-  // is entered from a task that is not the cacheTask while the cacheTask
-  // is registered as active. See `s_cacheTaskHandle_` above. No-op on
-  // host builds.
-  static void warnIfNonOwner(const char* methodName);
+  template <Color color>
+  void drawPixelDither(int x, int y) const;
+  template <Color color>
+  void fillRectImpl(int x, int y, int width, int height) const;
+  template <Color color>
+  void fillArc(int maxRadius, int cx, int cy, int xDir, int yDir) const;
 
  public:
-  explicit GfxRenderer(EInkDisplay& einkDisplay)
-      : einkDisplay(einkDisplay), renderMode(BW), orientation(Portrait) {
-    allocateBitmapRowBuffers();
-  }
-  ~GfxRenderer() { freeBitmapRowBuffers(); }
+  explicit GfxRenderer(HalDisplay& halDisplay)
+      : display(halDisplay), renderMode(BW), orientation(Portrait), fadingFix(false), darkMode(false) {}
+  ~GfxRenderer() { freeBwBufferChunks(); }
 
   static constexpr int VIEWABLE_MARGIN_TOP = 9;
   static constexpr int VIEWABLE_MARGIN_RIGHT = 3;
   static constexpr int VIEWABLE_MARGIN_BOTTOM = 3;
   static constexpr int VIEWABLE_MARGIN_LEFT = 3;
 
-  // ── Single-task ownership tracking (CONCURRENCY.md C1) ────────────
-  //
-  // The renderer is owned by exactly one task at a time. By convention
-  // (verified at the audit-plan stage and now enforced here), main task
-  // calls `stopBackgroundCaching()` before invoking any renderer method
-  // that mutates shared state (wordWidthCache, framebuffer, etc.). The
-  // cacheTask is allowed to invoke renderer methods while it's running
-  // — it owns the renderer during that window.
-  //
-  // ReaderState publishes the cacheTask's TaskHandle into
-  // `s_cacheTaskHandle_` between `startBackgroundCaching()` and the
-  // matching `stopBackgroundCaching()`. The check at the entry of every
-  // mutating public method warns when a NON-cacheTask caller invokes
-  // a renderer method while the field is non-null — that's main task
-  // forgetting to stop the bg first, the bug pattern from audits #6/#7.
-  //
-  // Set to `nullptr` when no bg task is active; reads/writes are
-  // single-aligned-pointer and safe across the single-core ESP32-C3
-  // pipeline (CONCURRENCY.md C6). On host test builds the field is
-  // unused (no FreeRTOS tasks).
-#ifdef ARDUINO
-  static TaskHandle_t s_cacheTaskHandle_;
-#endif
-
   // Setup
-  void begin();
+  void begin();  // must be called right after display.begin()
   void insertFont(int fontId, EpdFontFamily font);
-  void removeFont(int fontId);
-  void clearWidthCache() {
-    std::unordered_map<uint64_t, int32_t>().swap(wordWidthCache);
-    std::deque<uint64_t>().swap(wordWidthOrder);
+  void removeFont(int fontId) {
+    fontMap.erase(fontId);
+    sdCardFonts_.erase(fontId);
   }
-  void setExternalFont(ExternalFont* font) { _externalFont = font; }
-  ExternalFont* getExternalFont() const { return _externalFont; }
-
-  void setFontStyleResolver(FontStyleResolver resolver, void* ctx) {
-    _fontStyleResolver = resolver;
-    _fontStyleResolverCtx = ctx;
-  }
-  void updateFontFamily(int fontId, EpdFontFamily::Style style, const EpdFont* font) {
-    auto it = fontMap.find(fontId);
-    if (it != fontMap.end()) {
-      it->second.setFont(style, font);
-    }
-  }
-
-  void setStreamingFont(int fontId, EpdFontFamily::Style style, StreamingEpdFont* font) {
-    int idx = (style == EpdFontFamily::BOLD_ITALIC) ? EpdFontFamily::BOLD : style;
-    // std::map::operator[] value-initializes new entries, so array elements are nullptr by default
-    _streamingFonts[fontId][idx] = font;
-  }
-  void setStreamingFont(int fontId, StreamingEpdFont* font) { _streamingFonts[fontId][EpdFontFamily::REGULAR] = font; }
-  void removeStreamingFont(int fontId) { _streamingFonts.erase(fontId); }
-  // NOTE: May trigger lazy font loading (SD I/O + allocation) on first access to bold/italic.
-  // Thread safety: caller must have exclusive renderer access (ownership model).
-  StreamingEpdFont* getStreamingFont(int fontId, EpdFontFamily::Style style = EpdFontFamily::REGULAR) const {
-    auto it = _streamingFonts.find(fontId);
-    if (it == _streamingFonts.end()) return nullptr;
-    int idx = (style == EpdFontFamily::BOLD_ITALIC) ? EpdFontFamily::BOLD : style;
-    StreamingEpdFont* sf = it->second[idx];
-    if (!sf && idx != EpdFontFamily::REGULAR && _fontStyleResolver) {
-      _fontStyleResolver(_fontStyleResolverCtx, fontId, idx);
-      sf = it->second[idx];
-    }
-    return sf ? sf : it->second[EpdFontFamily::REGULAR];
-  }
+  void setFontCacheManager(FontCacheManager* m) { fontCacheManager_ = m; }
+  FontCacheManager* getFontCacheManager() const { return fontCacheManager_; }
+  bool isFontCacheScanning() const;
+  const std::map<int, EpdFontFamily>& getFontMap() const { return fontMap; }
+  void registerSdCardFont(int fontId, SdCardFont* font) { sdCardFonts_[fontId] = font; }
+  void unregisterSdCardFont(int fontId) { removeFont(fontId); }
+  void clearSdCardFonts() { sdCardFonts_.clear(); }
+  const std::map<int, SdCardFont*>& getSdCardFonts() const { return sdCardFonts_; }
+  bool isSdCardFont(int fontId) const { return sdCardFonts_.count(fontId) > 0; }
+  void ensureSdCardFontReady(int fontId, const char* utf8Text, uint8_t styleMask = 0x0F) const;
+  void ensureSdCardFontReady(int fontId, const std::vector<std::string>& words, bool includeHyphen,
+                             uint8_t styleMask = 0x0F) const;
+  bool releaseSdCardFontForLowMemory(int fontId) const;
 
   // Orientation control (affects logical width/height and coordinate transforms)
   void setOrientation(const Orientation o) { orientation = o; }
   Orientation getOrientation() const { return orientation; }
 
+  // Fading fix control
+  void setFadingFix(const bool enabled) { fadingFix = enabled; }
+  void setDarkMode(const bool enabled) { darkMode = enabled; }
+  bool isDarkMode() const { return darkMode; }
+  void requestNextRefresh(const HalDisplay::RefreshMode mode) const {
+    nextRefreshOverride = mode;
+    nextRefreshOverridePending = true;
+  }
+  void clearNextRefreshOverride() const { nextRefreshOverridePending = false; }
+  void requestNextFullRefresh() const { requestNextRefresh(HalDisplay::FULL_REFRESH); }
+  void setTextDarkness(const uint8_t d) { textDarkness = d; }
+  uint8_t getTextDarkness() const { return textDarkness; }
+
   // Screen ops
   int getScreenWidth() const;
   int getScreenHeight() const;
-  void displayBuffer(EInkDisplay::RefreshMode refreshMode = EInkDisplay::FAST_REFRESH,
-                     bool turnOffScreen = false) const;
+  void displayBuffer(HalDisplay::RefreshMode refreshMode = HalDisplay::FAST_REFRESH) const;
   // EXPERIMENTAL: Windowed update - display only a rectangular region
-  void displayWindow(int x, int y, int width, int height, bool turnOffScreen = false) const;
+  // void displayWindow(int x, int y, int width, int height) const;
   void invertScreen() const;
   void clearScreen(uint8_t color = 0xFF) const;
+  void getOrientedViewableTRBL(int* outTop, int* outRight, int* outBottom, int* outLeft) const;
 
-  // Check if an async display refresh is in progress (non-blocking).
-  // Emulators/animations can skip rendering when the display is busy.
-  bool isRefreshing() const { return einkDisplay.isRefreshing(); }
-
-  // Periodic refresh: auto-promote FAST_REFRESH to HALF_REFRESH every N fast
-  // refreshes to clear accumulated e-ink ghosting. Set to 0 to disable.
-  void setPeriodicRefreshInterval(int interval) { periodicRefreshInterval_ = interval; }
-  void resetPeriodicRefreshCounter() { fastRefreshCount_ = 0; }
-
-  // Sunlight fading fix: power off display after each refresh to prevent
-  // e-ink fading in direct sunlight. Applied automatically to all displayBuffer
-  // calls unless explicitly overridden by passing turnOffScreen=true/false.
-  void setFadingFix(bool enabled) { fadingFix_ = enabled; }
-  void setTextDarkness(uint8_t level) { textDarkness_ = level; }
-  uint8_t getTextDarkness() const { return textDarkness_; }
-  void clearArea(int x, int y, int width, int height, uint8_t color = 0xFF) const;
+  void beginStripTarget(uint8_t* scratch, int stripY0, int stripRows) const;
+  void endStripTarget() const;
+  bool glyphIntersectsStrip(int x0, int y0, int x1, int y1) const;
+  uint8_t* getWriteTarget() const { return _stripActive ? _stripBuf : frameBuffer; }
+  int getWriteOriginY() const { return _stripActive ? _stripY0 : 0; }
+  int getWriteRows() const { return _stripActive ? _stripRows : panelHeight; }
 
   // Drawing
   void drawPixel(int x, int y, bool state = true) const;
+  void drawPixelDirect(int x, int y, bool state = true) const { drawPixelRaw(x, y, state); }
   void drawLine(int x1, int y1, int x2, int y2, bool state = true) const;
+  void drawLine(int x1, int y1, int x2, int y2, int lineWidth, bool state) const;
+  void drawArc(int maxRadius, int cx, int cy, int xDir, int yDir, int lineWidth, bool state) const;
   void drawRect(int x, int y, int width, int height, bool state = true) const;
+  void drawRect(int x, int y, int width, int height, int lineWidth, bool state) const;
+  void drawRoundedRect(int x, int y, int width, int height, int lineWidth, int cornerRadius, bool state) const;
+  void drawRoundedRect(int x, int y, int width, int height, int lineWidth, int cornerRadius, bool roundTopLeft,
+                       bool roundTopRight, bool roundBottomLeft, bool roundBottomRight, bool state) const;
+  void maskRoundedRectOutsideCorners(int x, int y, int width, int height, int radius, Color color = Color::White) const;
   void fillRect(int x, int y, int width, int height, bool state = true) const;
+  void fillRectDither(int x, int y, int width, int height, Color color) const;
+  void fillRoundedRect(int x, int y, int width, int height, int cornerRadius, Color color) const;
+  void fillRoundedRect(int x, int y, int width, int height, int cornerRadius, bool roundTopLeft, bool roundTopRight,
+                       bool roundBottomLeft, bool roundBottomRight, Color color) const;
   void drawImage(const uint8_t bitmap[], int x, int y, int width, int height) const;
-  void drawBitmap(const Bitmap& bitmap, int x, int y, int maxWidth, int maxHeight) const;
+  void drawIcon(const uint8_t bitmap[], int x, int y, int width, int height) const;
+  void drawIconBlack(const uint8_t bitmap[], int x, int y, int width, int height) const;
+  void drawIconInverted(const uint8_t bitmap[], int x, int y, int width, int height) const;
+  void drawBitmap(const Bitmap& bitmap, int x, int y, int maxWidth, int maxHeight, float cropX = 0,
+                  float cropY = 0) const;
+  void drawBitmap1Bit(const Bitmap& bitmap, int x, int y, int maxWidth, int maxHeight) const;
+  void fillPolygon(const int* xPoints, const int* yPoints, int numPoints, bool state = true) const;
 
   // Text
   int getTextWidth(int fontId, const char* text, EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;
@@ -275,45 +178,99 @@ class GfxRenderer {
                         EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;
   void drawText(int fontId, int x, int y, const char* text, bool black = true,
                 EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;
-  int getSpaceWidth(int fontId) const;
+  int getSpaceWidth(int fontId, EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;
+  /// Returns the total inter-word advance: fp4::toPixel(spaceAdvance + kern(leftCp,' ') + kern(' ',rightCp)).
+  /// Using a single snap avoids the +/-1 px rounding error that arises when space advance and kern are
+  /// snapped separately and then added as integers.
+  int getSpaceAdvance(int fontId, uint32_t leftCp, uint32_t rightCp, EpdFontFamily::Style style) const;
+  /// Returns the kerning adjustment between two adjacent codepoints.
+  int getKerning(int fontId, uint32_t leftCp, uint32_t rightCp, EpdFontFamily::Style style) const;
+  int getTextAdvanceX(int fontId, const char* text, EpdFontFamily::Style style) const;
   int getFontAscenderSize(int fontId) const;
   int getLineHeight(int fontId) const;
-  std::string truncatedText(const int fontId, const char* text, const int maxWidth,
-                            const EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;
-  // Breaks a single word into chunks that fit within maxWidth, adding "-" where needed
-  std::vector<std::string> breakWordWithHyphenation(int fontId, const char* word, int maxWidth,
-                                                    EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;
-  std::vector<std::string> wrapTextWithHyphenation(int fontId, const char* text, int maxWidth, int maxLines,
-                                                   EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;
-  bool fontSupportsGrayscale(int fontId) const;
+  std::string truncatedText(int fontId, const char* text, int maxWidth,
+                            EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;
+  /// Word-wrap \p text into at most \p maxLines lines, each no wider than
+  /// \p maxWidth pixels. Overflowing words and excess lines are UTF-8-safely
+  /// truncated with an ellipsis (U+2026).
+  std::vector<std::string> wrappedText(int fontId, const char* text, int maxWidth, int maxLines,
+                                       EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;
 
-  // Thai text rendering
-  int getThaiTextWidth(int fontId, const char* text, EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;
-  void drawThaiText(int fontId, int x, int y, const char* text, bool black = true,
-                    EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;
-
-  // Arabic text rendering
-  int getArabicTextWidth(int fontId, const char* text, EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;
-  void drawArabicText(int fontId, int x, int y, const char* text, bool black = true,
-                      EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;
-
-  // UI Components
-  void drawButtonHints(int fontId, const char* btn1, const char* btn2, const char* btn3, const char* btn4,
-                       bool black = true) const;
+  // Helper for drawing rotated text (90 degrees clockwise, for side buttons)
+  void drawTextRotated90CW(int fontId, int x, int y, const char* text, bool black = true,
+                           EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;
+  int getTextHeight(int fontId) const;
 
   // Grayscale functions
   void setRenderMode(const RenderMode mode) { this->renderMode = mode; }
   RenderMode getRenderMode() const { return renderMode; }
+  void preconditionGrayscale() const;
+  void preconditionGrayscale(int x, int y, int w, int h) const;
+  void displayGrayscaleBase(HalDisplay::RefreshMode fallback = HalDisplay::HALF_REFRESH) const;
   void copyGrayscaleLsbBuffers() const;
   void copyGrayscaleMsbBuffers() const;
-  void displayGrayBuffer(bool turnOffScreen = false) const;
-  bool storeBwBuffer();  // Returns true if buffer was stored successfully
-  void restoreBwBuffer();
+  void displayGrayBuffer() const;
+  void writeGrayscalePlaneStrip(bool lsbPlane, const uint8_t* scratch, int yStart, int numRows) const;
+  bool supportsStripGrayscale() const;
+  bool storeBwBuffer();    // Returns true if buffer was stored successfully
+  void restoreBwBuffer();  // Restore and free the stored buffer
   void cleanupGrayscaleWithFrameBuffer() const;
+
+  // Temporarily expose the framebuffer as build scratch. No drawing is valid
+  // while it is lent; restore always returns a cleared, ready-to-redraw buffer.
+  void releaseFrameBufferForBuild();
+  bool restoreFrameBufferAfterBuild();
+  bool hasFrameBuffer() const { return frameBuffer != nullptr; }
+
+  class FrameBufferLoan {
+   public:
+    explicit FrameBufferLoan(GfxRenderer& renderer);
+    ~FrameBufferLoan() { end(); }
+    FrameBufferLoan(const FrameBufferLoan&) = delete;
+    FrameBufferLoan& operator=(const FrameBufferLoan&) = delete;
+    void end();
+
+   private:
+    GfxRenderer& renderer_;
+    bool active_ = false;
+  };
+
+  // Font helpers
+  const uint8_t* getGlyphBitmap(const EpdFontData* fontData, const EpdGlyph* glyph) const;
 
   // Low level functions
   uint8_t* getFrameBuffer() const;
   size_t getBufferSize() const;
-  void grayscaleRevert() const;
-  void getOrientedViewableTRBL(int* outTop, int* outRight, int* outBottom, int* outLeft) const;
+  uint16_t getDisplayWidth() const { return panelWidth; }
+  uint16_t getDisplayHeight() const { return panelHeight; }
+  uint16_t getDisplayWidthBytes() const { return panelWidthBytes; }
+  size_t getRegionByteSize(int logicalX, int logicalY, int logicalW, int logicalH) const;
+  bool copyRegionToBuffer(int logicalX, int logicalY, int logicalW, int logicalH, uint8_t* buf, size_t bufSize) const;
+  bool copyBufferToRegion(int logicalX, int logicalY, int logicalW, int logicalH, const uint8_t* buf,
+                          size_t bufSize) const;
+};
+
+class GfxStripTargetScope {
+ public:
+  GfxStripTargetScope(const GfxRenderer& renderer, uint8_t* scratch, const int stripY0, const int stripRows)
+      : renderer_(renderer), active_(true) {
+    renderer_.beginStripTarget(scratch, stripY0, stripRows);
+  }
+  GfxStripTargetScope(const GfxStripTargetScope&) = delete;
+  GfxStripTargetScope& operator=(const GfxStripTargetScope&) = delete;
+  ~GfxStripTargetScope() {
+    if (active_) {
+      renderer_.endStripTarget();
+    }
+  }
+
+  void end() {
+    if (!active_) return;
+    renderer_.endStripTarget();
+    active_ = false;
+  }
+
+ private:
+  const GfxRenderer& renderer_;
+  bool active_;
 };

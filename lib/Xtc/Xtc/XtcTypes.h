@@ -2,7 +2,7 @@
  * XtcTypes.h
  *
  * XTC file format type definitions
- * XTC ebook format (originally from CrossPoint Reader)
+ * XTC ebook support for CrossPoint Reader
  *
  * XTC is the native binary ebook format for XTeink X4 e-reader.
  * It stores pre-rendered bitmap images per page.
@@ -11,8 +11,6 @@
  */
 
 #pragma once
-
-#include <FsHelpers.h>
 
 #include <cstdint>
 #include <string>
@@ -33,21 +31,25 @@ constexpr uint32_t XTH_MAGIC = 0x00485458;  // "XTH\0" for 2-bit page data
 constexpr uint16_t DISPLAY_WIDTH = 480;
 constexpr uint16_t DISPLAY_HEIGHT = 800;
 
-// XTC file header (56 bytes)
+constexpr uint64_t XTC_LEGACY_HEADER_SIZE = 0x30;  // Original header before chapterOffset was added.
+
+// XTC file header (56 bytes; legacy files may start the page table at 48 bytes)
 #pragma pack(push, 1)
 struct XtcHeader {
   uint32_t magic;            // 0x00: Magic number "XTC\0" (0x00435458)
   uint8_t versionMajor;      // 0x04: Format version major (typically 1) (together with minor = 1.0)
   uint8_t versionMinor;      // 0x05: Format version minor (typically 0)
   uint16_t pageCount;        // 0x06: Total page count
-  uint32_t flags;            // 0x08: Flags/reserved
-  uint32_t headerSize;       // 0x0C: Size of header section (typically 88)
-  uint32_t reserved1;        // 0x10: Reserved
-  uint32_t tocOffset;        // 0x14: TOC offset (0 if unused) - 4 bytes, not 8!
+  uint8_t readDirection;     // 0x08: Reading direction (0-2)
+  uint8_t hasMetadata;       // 0x09: Has metadata (0-1)
+  uint8_t hasThumbnails;     // 0x0A: Has thumbnails (0-1)
+  uint8_t hasChapters;       // 0x0B: Has chapters (0-1)
+  uint32_t currentPage;      // 0x0C: Current page (1-based) (0-65535)
+  uint64_t metadataOffset;   // 0x10: Metadata offset (0 if unused)
   uint64_t pageTableOffset;  // 0x18: Page table offset
   uint64_t dataOffset;       // 0x20: First page data offset
-  uint64_t reserved2;        // 0x28: Reserved
-  uint32_t titleOffset;      // 0x30: Title string offset
+  uint64_t thumbOffset;      // 0x28: Thumbnail offset
+  uint32_t chapterOffset;    // 0x30: Chapter data offset
   uint32_t padding;          // 0x34: Padding to 56 bytes
 };
 #pragma pack(pop)
@@ -88,13 +90,13 @@ struct XtgPageHeader {
 
 // Page information (internal use, optimized for memory)
 struct PageInfo {
-  uint32_t offset;   // File offset to page data (max 4GB file size)
+  uint64_t offset;   // File offset to page data
   uint32_t size;     // Data size (bytes)
   uint16_t width;    // Page width
   uint16_t height;   // Page height
   uint8_t bitDepth;  // 1 = XTG (1-bit), 2 = XTH (2-bit grayscale)
   uint8_t padding;   // Alignment padding
-};  // 16 bytes total
+};
 
 struct ChapterInfo {
   std::string name;
@@ -143,10 +145,5 @@ inline const char* errorToString(XtcError err) {
       return "Unknown error";
   }
 }
-
-/**
- * Check if filename has XTC/XTCH extension
- */
-inline bool isXtcExtension(const char* filename) { return FsHelpers::isXtcFile(filename); }
 
 }  // namespace xtc

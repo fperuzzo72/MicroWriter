@@ -25,16 +25,18 @@ class Epub {
   std::string cachePath;
   // Spine and TOC cache
   std::unique_ptr<BookMetadataCache> bookMetadataCache;
-  // CSS parser for stylesheet rules
-  std::unique_ptr<CssParser> cssParser_;
-  // CSS file paths from manifest
-  std::vector<std::string> cssFiles_;
+  // CSS parser for styling
+  std::unique_ptr<CssParser> cssParser;
+  // CSS files
+  std::vector<std::string> cssFiles;
 
   bool findContentOpfFile(std::string* contentOpfFile) const;
-  bool parseCssFiles();
-  bool parseContentOpf(BookMetadataCache::BookMetadata& bookMetadata);
+  bool parseContentOpf(BookMetadataCache::BookMetadata& bookMetadata, bool writeSpineEntries = true);
   bool parseTocNcxFile() const;
   bool parseTocNavFile() const;
+  void discoverCssFilesFromZip();
+  bool generateThumbBmpToPath(int width, int height, const std::string& thumbPath) const;
+  void parseCssFiles() const;
 
  public:
   explicit Epub(std::string filepath, const std::string& cacheDir) : filepath(std::move(filepath)) {
@@ -43,26 +45,27 @@ class Epub {
   }
   ~Epub() = default;
   std::string& getBasePath() { return contentBasePath; }
-  bool load(bool buildIfMissing = true);
+  bool load(bool buildIfMissing = true, bool skipLoadingCss = false);
   bool clearCache() const;
   void setupCacheDir() const;
   const std::string& getCachePath() const;
   const std::string& getPath() const;
   const std::string& getTitle() const;
   const std::string& getAuthor() const;
-  const std::string& getSubject() const;
   const std::string& getLanguage() const;
-  std::string getCoverBmpPath() const;
-  std::string getCoverPreviewBmpPath() const;
-  bool generateCoverBmp(bool use1BitDithering = false) const;
-  bool generateCoverPreviewBmp() const;
+  std::string getCoverBmpPath(bool cropped = false) const;
+  bool generateCoverBmp(bool cropped = false) const;
   std::string getThumbBmpPath() const;
-  bool generateThumbBmp() const;
-  std::string findCoverImage() const;
+  std::string getThumbBmpPath(int height) const;
+  std::string getThumbBmpPath(int width, int height) const;
+  bool generateThumbBmp(int height) const;
+  bool generateThumbBmp(int width, int height) const;
   uint8_t* readItemContentsToBytes(const std::string& itemHref, size_t* size = nullptr,
                                    bool trailingNullByte = false) const;
   bool readItemContentsToStream(const std::string& itemHref, Print& out, size_t chunkSize,
-                                uint8_t* dictBuffer = nullptr) const;
+                                bool allowEarlyStop = false) const;
+  bool readItemPrefixToBuffer(const std::string& itemHref, uint8_t* out, size_t maxBytes, size_t* bytesRead,
+                              size_t chunkSize) const;
   bool getItemSize(const std::string& itemHref, size_t* size) const;
   BookMetadataCache::SpineEntry getSpineItem(int spineIndex) const;
   BookMetadataCache::TocEntry getTocItem(int tocIndex) const;
@@ -70,6 +73,11 @@ class Epub {
   int getTocItemsCount() const;
   int getSpineIndexForTocIndex(int tocIndex) const;
   int getTocIndexForSpineIndex(int spineIndex) const;
+  size_t getCumulativeSpineItemSize(int spineIndex) const;
   int getSpineIndexForTextReference() const;
-  const CssParser* getCssParser() const { return cssParser_.get(); }
+
+  size_t getBookSize() const;
+  float calculateProgress(int currentSpineIndex, float currentSpineRead) const;
+  CssParser* getCssParser() const { return cssParser.get(); }
+  int resolveHrefToSpineIndex(const std::string& href) const;
 };

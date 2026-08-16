@@ -1,78 +1,35 @@
-/**
- * Txt.h
- *
- * Plain text file handler for SUMI
- * Provides EPUB-like interface for TXT file handling
- */
-
 #pragma once
 
+#include <HalStorage.h>
+
+#include <memory>
 #include <string>
 
-/**
- * TXT File Handler
- *
- * Handles TXT file loading, content streaming, and cover image discovery.
- * Interface designed to be similar to Epub/Xtc classes for easy integration.
- */
 class Txt {
   std::string filepath;
+  std::string cacheBasePath;
   std::string cachePath;
-  std::string title;
-  size_t fileSize;
-  bool loaded;
+  bool loaded = false;
+  size_t fileSize = 0;
 
  public:
-  explicit Txt(std::string filepath, const std::string& cacheDir);
-  ~Txt() = default;
+  explicit Txt(std::string path, std::string cacheBasePath);
 
-  /**
-   * Load TXT file (verify existence and get size)
-   * @return true on success
-   */
   bool load();
+  [[nodiscard]] const std::string& getPath() const { return filepath; }
+  [[nodiscard]] const std::string& getCachePath() const { return cachePath; }
+  [[nodiscard]] std::string getTitle() const;
+  [[nodiscard]] size_t getFileSize() const { return fileSize; }
+  [[nodiscard]] bool isMarkdown() const;
 
-  /**
-   * Clear cached data
-   * @return true on success
-   */
   bool clearCache() const;
-
-  /**
-   * Setup cache directory
-   */
   void setupCacheDir() const;
 
-  // Path accessors
-  const std::string& getCachePath() const { return cachePath; }
-  const std::string& getPath() const { return filepath; }
+  // Cover image support - looks for cover.bmp/jpg/jpeg/png in same folder as txt file
+  [[nodiscard]] std::string getCoverBmpPath() const;
+  [[nodiscard]] bool generateCoverBmp() const;
+  [[nodiscard]] std::string findCoverImage() const;
 
-  // Metadata
-  const std::string& getTitle() const { return title; }
-  size_t getFileSize() const { return fileSize; }
-
-  // Cover image support (for sleep screen and home view)
-  std::string getCoverBmpPath() const;
-  bool generateCoverBmp(bool use1BitDithering = false) const;
-  std::string getThumbBmpPath() const;
-  bool generateThumbBmp() const;
-
-  /**
-   * Read content from file at specified offset
-   * @param buffer Output buffer
-   * @param offset Byte offset in file
-   * @param length Number of bytes to read
-   * @return Number of bytes actually read
-   */
-  size_t readContent(uint8_t* buffer, size_t offset, size_t length) const;
-
-  /**
-   * Find a cover image in the same directory as the TXT file
-   * Searches for: <filename>.jpg, <filename>.bmp, cover.jpg, cover.bmp
-   * @return Path to cover image, or empty string if not found
-   */
-  std::string findCoverImage() const;
-
-  // Check if file is loaded
-  bool isLoaded() const { return loaded; }
+  // Read content from file
+  [[nodiscard]] bool readContent(uint8_t* buffer, size_t offset, size_t length) const;
 };

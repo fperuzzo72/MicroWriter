@@ -1,7 +1,0 @@
-{
-  "name": "SumiClock",
-  "version": "1.0.0",
-  "description": "Wall-clock for SUMI via BLE time sync",
-  "platforms": "espressif32",
-  "frameworks": ["arduino", "espidf"]
-}

@@ -1,14 +1,15 @@
 #include "TocNavParser.h"
 
 #include <FsHelpers.h>
-#include <HardwareSerial.h>
+#include <Logging.h>
+#include <XmlParserUtils.h>
 
 #include "../BookMetadataCache.h"
 
 bool TocNavParser::setup() {
   parser = XML_ParserCreate(nullptr);
   if (!parser) {
-    Serial.printf("[%lu] [NAV] Couldn't allocate memory for parser\n", millis());
+    LOG_DBG("NAV", "Couldn't allocate memory for parser");
     return false;
   }
 
@@ -18,15 +19,7 @@ bool TocNavParser::setup() {
   return true;
 }
 
-TocNavParser::~TocNavParser() {
-  if (parser) {
-    XML_StopParser(parser, XML_FALSE);
-    XML_SetElementHandler(parser, nullptr, nullptr);
-    XML_SetCharacterDataHandler(parser, nullptr);
-    XML_ParserFree(parser);
-    parser = nullptr;
-  }
-}
+TocNavParser::~TocNavParser() { destroyXmlParser(parser); }
 
 size_t TocNavParser::write(const uint8_t data) { return write(&data, 1); }
 
@@ -39,12 +32,8 @@ size_t TocNavParser::write(const uint8_t* buffer, const size_t size) {
   while (remainingInBuffer > 0) {
     void* const buf = XML_GetBuffer(parser, 1024);
     if (!buf) {
-      Serial.printf("[%lu] [NAV] Couldn't allocate memory for buffer\n", millis());
-      XML_StopParser(parser, XML_FALSE);
-      XML_SetElementHandler(parser, nullptr, nullptr);
-      XML_SetCharacterDataHandler(parser, nullptr);
-      XML_ParserFree(parser);
-      parser = nullptr;
+      LOG_DBG("NAV", "Couldn't allocate memory for buffer");
+      destroyXmlParser(parser);
       return 0;
     }
 
@@ -52,13 +41,9 @@ size_t TocNavParser::write(const uint8_t* buffer, const size_t size) {
     memcpy(buf, currentBufferPos, toRead);
 
     if (XML_ParseBuffer(parser, static_cast<int>(toRead), remainingSize == toRead) == XML_STATUS_ERROR) {
-      Serial.printf("[%lu] [NAV] Parse error at line %lu: %s\n", millis(), XML_GetCurrentLineNumber(parser),
-                    XML_ErrorString(XML_GetErrorCode(parser)));
-      XML_StopParser(parser, XML_FALSE);
-      XML_SetElementHandler(parser, nullptr, nullptr);
-      XML_SetCharacterDataHandler(parser, nullptr);
-      XML_ParserFree(parser);
-      parser = nullptr;
+      LOG_DBG("NAV", "Parse error at line %lu: %s", XML_GetCurrentLineNumber(parser),
+              XML_ErrorString(XML_GetErrorCode(parser)));
+      destroyXmlParser(parser);
       return 0;
     }
 
@@ -88,7 +73,7 @@ void XMLCALL TocNavParser::startElement(void* userData, const XML_Char* name, co
     for (int i = 0; atts[i]; i += 2) {
       if ((strcmp(atts[i], "epub:type") == 0 || strcmp(atts[i], "type") == 0) && strcmp(atts[i + 1], "toc") == 0) {
         self->state = IN_NAV_TOC;
-        Serial.printf("[%lu] [NAV] Found nav toc element\n", millis());
+        LOG_DBG("NAV", "Found nav toc element");
         return;
       }
     }
@@ -131,20 +116,7 @@ void XMLCALL TocNavParser::characterData(void* userData, const XML_Char* s, cons
 
   // Only collect text when inside an anchor within the TOC nav
   if (self->state == IN_ANCHOR) {
-    if (self->currentLabel.size() + static_cast<size_t>(len) <= MAX_NAV_LABEL_LENGTH) {
-      self->currentLabel.append(s, len);
-    } else if (self->currentLabel.size() < MAX_NAV_LABEL_LENGTH) {
-      size_t remaining = MAX_NAV_LABEL_LENGTH - self->currentLabel.size();
-      if (remaining > static_cast<size_t>(len)) remaining = static_cast<size_t>(len);
-      // Walk back if we'd split a multi-byte UTF-8 sequence
-      while (remaining > 0 && (s[remaining] & 0xC0) == 0x80) {
-        remaining--;
-      }
-      if (remaining > 0) {
-        self->currentLabel.append(s, remaining);
-      }
-      Serial.printf("[NAV] Label truncated at %zu bytes\n", self->currentLabel.size());
-    }
+    self->currentLabel.append(s, len);
   }
 }
 
@@ -154,13 +126,14 @@ void XMLCALL TocNavParser::endElement(void* userData, const XML_Char* name) {
   if (strcmp(name, "a") == 0 && self->state == IN_ANCHOR) {
     // Create TOC entry when closing anchor tag (we have all data now)
     if (!self->currentLabel.empty() && !self->currentHref.empty()) {
-      std::string href = FsHelpers::normalisePath(self->baseContentPath + self->currentHref);
+      const std::string rawTarget = self->baseContentPath + self->currentHref;
+      const size_t pos = rawTarget.find('#');
+      const std::string rawPath = pos == std::string::npos ? rawTarget : rawTarget.substr(0, pos);
+      std::string href = FsHelpers::normalisePath(FsHelpers::decodeUriEscapes(rawPath));
       std::string anchor;
 
-      const size_t pos = href.find('#');
       if (pos != std::string::npos) {
-        anchor = href.substr(pos + 1);
-        href = href.substr(0, pos);
+        anchor = FsHelpers::decodeUriEscapes(rawTarget.substr(pos + 1));
       }
 
       if (self->cache) {
@@ -192,7 +165,7 @@ void XMLCALL TocNavParser::endElement(void* userData, const XML_Char* name) {
 
   if (strcmp(name, "nav") == 0 && self->state >= IN_NAV_TOC) {
     self->state = IN_BODY;
-    Serial.printf("[%lu] [NAV] Finished parsing nav toc\n", millis());
+    LOG_DBG("NAV", "Finished parsing nav toc");
     return;
   }
 }

@@ -1,8 +1,9 @@
 #pragma once
 
 #include <cstdint>
-#include <cstdlib>
 #include <cstring>
+
+struct BmpHeader;
 
 // Helper functions
 uint8_t quantize(int gray, int x, int y);
@@ -10,16 +11,10 @@ uint8_t quantizeSimple(int gray);
 uint8_t quantize1bit(int gray, int x, int y);
 int adjustPixel(int gray);
 
-// RGB to grayscale conversion using BT.601 coefficients via lookup tables.
-// Avoids 3 multiplications per pixel on ESP32-C3 (no FPU).
-// Note: Sum of max values is 254 (not 255) due to integer truncation of coefficients.
-// This is expected behavior - pure white (255,255,255) maps to 254.
-uint8_t rgbToGray(uint8_t r, uint8_t g, uint8_t b);
+enum class BmpRowOrder { BottomUp, TopDown };
 
-// Scale down a BMP file to create a 2-bit (4 gray level) thumbnail.
-// Uses area averaging for clean downscaling with Atkinson dithering.
-// Returns true on success, false on failure.
-bool bmpTo2BitBmpScaled(const char* srcPath, const char* dstPath, int targetMaxWidth, int targetMaxHeight);
+// Populates a 1-bit BMP header in the provided memory.
+void createBmpHeader(BmpHeader* bmpHeader, int width, int height, BmpRowOrder rowOrder);
 
 // 1-bit Atkinson dithering - better quality than noise dithering for thumbnails
 // Error distribution pattern (same as 2-bit but quantizes to 2 levels):
@@ -28,47 +23,23 @@ bool bmpTo2BitBmpScaled(const char* srcPath, const char* dstPath, int targetMaxW
 //     1/8
 class Atkinson1BitDitherer {
  public:
-  static constexpr int PADDING = 16;  // Extra padding for safety
-
-  explicit Atkinson1BitDitherer(int width) : width(width), allocSize(width + PADDING), ownsMemory_(true) {
-    // Use calloc for zero-initialization
-    errorRow0 = static_cast<int16_t*>(calloc(allocSize, sizeof(int16_t)));
-    errorRow1 = static_cast<int16_t*>(calloc(allocSize, sizeof(int16_t)));
-    errorRow2 = static_cast<int16_t*>(calloc(allocSize, sizeof(int16_t)));
-    if (!errorRow0 || !errorRow1 || !errorRow2) {
-      free(errorRow0);
-      free(errorRow1);
-      free(errorRow2);
-      errorRow0 = errorRow1 = errorRow2 = nullptr;
-    }
-  }
-
-  // Arena-backed constructor: uses pre-allocated memory region (no heap alloc)
-  Atkinson1BitDitherer(int width, uint8_t* region, size_t regionSize)
-      : width(width), allocSize(width + PADDING), ownsMemory_(false) {
-    const size_t rowBytes = allocSize * sizeof(int16_t);
-    if (regionSize < rowBytes * 3) {
-      errorRow0 = errorRow1 = errorRow2 = nullptr;
-      return;
-    }
-    errorRow0 = reinterpret_cast<int16_t*>(region);
-    errorRow1 = reinterpret_cast<int16_t*>(region + rowBytes);
-    errorRow2 = reinterpret_cast<int16_t*>(region + rowBytes * 2);
-    memset(region, 0, rowBytes * 3);
+  explicit Atkinson1BitDitherer(int width) : width(width) {
+    errorRow0 = new int16_t[width + 4]();  // Current row
+    errorRow1 = new int16_t[width + 4]();  // Next row
+    errorRow2 = new int16_t[width + 4]();  // Row after next
   }
 
   ~Atkinson1BitDitherer() {
-    if (ownsMemory_) {
-      free(errorRow0);
-      free(errorRow1);
-      free(errorRow2);
-    }
+    delete[] errorRow0;
+    delete[] errorRow1;
+    delete[] errorRow2;
   }
 
+  // EXPLICITLY DELETE THE COPY CONSTRUCTOR
   Atkinson1BitDitherer(const Atkinson1BitDitherer& other) = delete;
-  Atkinson1BitDitherer& operator=(const Atkinson1BitDitherer& other) = delete;
 
-  bool isValid() const { return errorRow0 != nullptr; }
+  // EXPLICITLY DELETE THE COPY ASSIGNMENT OPERATOR
+  Atkinson1BitDitherer& operator=(const Atkinson1BitDitherer& other) = delete;
 
   uint8_t processPixel(int gray, int x) {
     // Apply brightness/contrast/gamma adjustments
@@ -109,19 +80,17 @@ class Atkinson1BitDitherer {
     errorRow0 = errorRow1;
     errorRow1 = errorRow2;
     errorRow2 = temp;
-    memset(errorRow2, 0, allocSize * sizeof(int16_t));
+    memset(errorRow2, 0, (width + 4) * sizeof(int16_t));
   }
 
   void reset() {
-    memset(errorRow0, 0, allocSize * sizeof(int16_t));
-    memset(errorRow1, 0, allocSize * sizeof(int16_t));
-    memset(errorRow2, 0, allocSize * sizeof(int16_t));
+    memset(errorRow0, 0, (width + 4) * sizeof(int16_t));
+    memset(errorRow1, 0, (width + 4) * sizeof(int16_t));
+    memset(errorRow2, 0, (width + 4) * sizeof(int16_t));
   }
 
  private:
   int width;
-  int allocSize;
-  bool ownsMemory_;
   int16_t* errorRow0;
   int16_t* errorRow1;
   int16_t* errorRow2;
@@ -135,46 +104,22 @@ class Atkinson1BitDitherer {
 // Less error buildup = fewer artifacts than Floyd-Steinberg
 class AtkinsonDitherer {
  public:
-  static constexpr int PADDING = 16;  // Extra padding for safety (max access is x+4, so 16 is overkill)
-
-  explicit AtkinsonDitherer(int width) : width(width), allocSize(width + PADDING), ownsMemory_(true) {
-    // Use calloc for zero-initialization to prevent undefined behavior
-    errorRow0 = static_cast<int16_t*>(calloc(allocSize, sizeof(int16_t)));
-    errorRow1 = static_cast<int16_t*>(calloc(allocSize, sizeof(int16_t)));
-    errorRow2 = static_cast<int16_t*>(calloc(allocSize, sizeof(int16_t)));
-    if (!errorRow0 || !errorRow1 || !errorRow2) {
-      free(errorRow0);
-      free(errorRow1);
-      free(errorRow2);
-      errorRow0 = errorRow1 = errorRow2 = nullptr;
-    }
-  }
-
-  // Arena-backed constructor: uses pre-allocated memory region (no heap alloc)
-  AtkinsonDitherer(int width, uint8_t* region, size_t regionSize)
-      : width(width), allocSize(width + PADDING), ownsMemory_(false) {
-    const size_t rowBytes = allocSize * sizeof(int16_t);
-    if (regionSize < rowBytes * 3) {
-      errorRow0 = errorRow1 = errorRow2 = nullptr;
-      return;
-    }
-    errorRow0 = reinterpret_cast<int16_t*>(region);
-    errorRow1 = reinterpret_cast<int16_t*>(region + rowBytes);
-    errorRow2 = reinterpret_cast<int16_t*>(region + rowBytes * 2);
-    memset(region, 0, rowBytes * 3);
+  explicit AtkinsonDitherer(int width) : width(width) {
+    errorRow0 = new int16_t[width + 4]();  // Current row
+    errorRow1 = new int16_t[width + 4]();  // Next row
+    errorRow2 = new int16_t[width + 4]();  // Row after next
   }
 
   ~AtkinsonDitherer() {
-    if (ownsMemory_) {
-      free(errorRow0);
-      free(errorRow1);
-      free(errorRow2);
-    }
+    delete[] errorRow0;
+    delete[] errorRow1;
+    delete[] errorRow2;
   }
+  // **1. EXPLICITLY DELETE THE COPY CONSTRUCTOR**
   AtkinsonDitherer(const AtkinsonDitherer& other) = delete;
-  AtkinsonDitherer& operator=(const AtkinsonDitherer& other) = delete;
 
-  bool isValid() const { return errorRow0 != nullptr; }
+  // **2. EXPLICITLY DELETE THE COPY ASSIGNMENT OPERATOR**
+  AtkinsonDitherer& operator=(const AtkinsonDitherer& other) = delete;
 
   uint8_t processPixel(int gray, int x) {
     // Add accumulated error
@@ -234,19 +179,17 @@ class AtkinsonDitherer {
     errorRow0 = errorRow1;
     errorRow1 = errorRow2;
     errorRow2 = temp;
-    memset(errorRow2, 0, allocSize * sizeof(int16_t));
+    memset(errorRow2, 0, (width + 4) * sizeof(int16_t));
   }
 
   void reset() {
-    memset(errorRow0, 0, allocSize * sizeof(int16_t));
-    memset(errorRow1, 0, allocSize * sizeof(int16_t));
-    memset(errorRow2, 0, allocSize * sizeof(int16_t));
+    memset(errorRow0, 0, (width + 4) * sizeof(int16_t));
+    memset(errorRow1, 0, (width + 4) * sizeof(int16_t));
+    memset(errorRow2, 0, (width + 4) * sizeof(int16_t));
   }
 
  private:
   int width;
-  int allocSize;
-  bool ownsMemory_;
   int16_t* errorRow0;
   int16_t* errorRow1;
   int16_t* errorRow2;
@@ -262,44 +205,21 @@ class AtkinsonDitherer {
 //      7/16  X
 class FloydSteinbergDitherer {
  public:
-  static constexpr int PADDING = 16;  // Extra padding for safety
-
-  explicit FloydSteinbergDitherer(int width)
-      : width(width), allocSize(width + PADDING), rowCount(0), ownsMemory_(true) {
-    // Use calloc for zero-initialization
-    errorCurRow = static_cast<int16_t*>(calloc(allocSize, sizeof(int16_t)));
-    errorNextRow = static_cast<int16_t*>(calloc(allocSize, sizeof(int16_t)));
-    if (!errorCurRow || !errorNextRow) {
-      free(errorCurRow);
-      free(errorNextRow);
-      errorCurRow = errorNextRow = nullptr;
-    }
-  }
-
-  // Arena-backed constructor: uses pre-allocated memory region (no heap alloc)
-  FloydSteinbergDitherer(int width, uint8_t* region, size_t regionSize)
-      : width(width), allocSize(width + PADDING), rowCount(0), ownsMemory_(false) {
-    const size_t rowBytes = allocSize * sizeof(int16_t);
-    if (regionSize < rowBytes * 2) {
-      errorCurRow = errorNextRow = nullptr;
-      return;
-    }
-    errorCurRow = reinterpret_cast<int16_t*>(region);
-    errorNextRow = reinterpret_cast<int16_t*>(region + rowBytes);
-    memset(region, 0, rowBytes * 2);
+  explicit FloydSteinbergDitherer(int width) : width(width), rowCount(0) {
+    errorCurRow = new int16_t[width + 2]();  // +2 for boundary handling
+    errorNextRow = new int16_t[width + 2]();
   }
 
   ~FloydSteinbergDitherer() {
-    if (ownsMemory_) {
-      free(errorCurRow);
-      free(errorNextRow);
-    }
+    delete[] errorCurRow;
+    delete[] errorNextRow;
   }
 
+  // **1. EXPLICITLY DELETE THE COPY CONSTRUCTOR**
   FloydSteinbergDitherer(const FloydSteinbergDitherer& other) = delete;
-  FloydSteinbergDitherer& operator=(const FloydSteinbergDitherer& other) = delete;
 
-  bool isValid() const { return errorCurRow != nullptr; }
+  // **2. EXPLICITLY DELETE THE COPY ASSIGNMENT OPERATOR**
+  FloydSteinbergDitherer& operator=(const FloydSteinbergDitherer& other) = delete;
 
   // Process a single pixel and return quantized 2-bit value
   // x is the logical x position (0 to width-1), direction handled internally
@@ -380,7 +300,7 @@ class FloydSteinbergDitherer {
     errorCurRow = errorNextRow;
     errorNextRow = temp;
     // Clear the next row buffer
-    memset(errorNextRow, 0, allocSize * sizeof(int16_t));
+    memset(errorNextRow, 0, (width + 2) * sizeof(int16_t));
     rowCount++;
   }
 
@@ -389,16 +309,14 @@ class FloydSteinbergDitherer {
 
   // Reset for a new image or MCU block
   void reset() {
-    memset(errorCurRow, 0, allocSize * sizeof(int16_t));
-    memset(errorNextRow, 0, allocSize * sizeof(int16_t));
+    memset(errorCurRow, 0, (width + 2) * sizeof(int16_t));
+    memset(errorNextRow, 0, (width + 2) * sizeof(int16_t));
     rowCount = 0;
   }
 
  private:
   int width;
-  int allocSize;
   int rowCount;
-  bool ownsMemory_;
   int16_t* errorCurRow;
   int16_t* errorNextRow;
 };

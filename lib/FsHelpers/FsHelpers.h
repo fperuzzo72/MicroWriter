@@ -1,63 +1,79 @@
 #pragma once
-#include <cstring>
+#include <WString.h>
+
 #include <string>
+#include <string_view>
+#include <vector>
 
-class FsHelpers {
- public:
-  // Collapse "." and ".." components in a path. Returns a RELATIVE
-  // path: a leading `/` on the input is silently dropped (the function
-  // splits on `/`, drops empties, joins with `/`). Today this is fine
-  // because the only callers feed it ZIP-internal paths from EPUB
-  // parsing, where leading slashes aren't expected. If you call this
-  // on a filesystem path expecting an absolute result back, you'll
-  // get a relative path and SD operations will fail. Audit #45.
-  // TODO: rename to normaliseRelative() to make the contract loud.
-  static std::string normalisePath(const std::string& path);
+namespace FsHelpers {
 
-  // Check if a filename should be hidden from file browsers
-  // Note: Does NOT check for "." prefix - caller should check that separately
-  static bool isHiddenFsItem(const char* name);
+std::string decodeUriEscapes(const std::string& path);
 
-  // Case-insensitive extension check. Extension must include dot (e.g., ".epub").
-  static inline bool hasExtension(const char* path, const char* ext) {
-    if (!path || !ext) return false;
-    const char* pathExt = strrchr(path, '.');
-    if (!pathExt) return false;
-    return strcasecmp(pathExt, ext) == 0;
-  }
+std::string normalisePath(const std::string& path);
 
-  static inline bool hasExtension(const std::string& path, const char* ext) { return hasExtension(path.c_str(), ext); }
+// Numeric-aware, case-insensitive comparison ("2" sorts before "10").
+bool naturalLess(const std::string& str1, const std::string& str2);
 
-  // Image formats
-  static inline bool isJpegFile(const char* path) { return hasExtension(path, ".jpg") || hasExtension(path, ".jpeg"); }
-  static inline bool isJpegFile(const std::string& path) { return isJpegFile(path.c_str()); }
+void sortFileList(std::vector<std::string>& strs);
 
-  static inline bool isPngFile(const char* path) { return hasExtension(path, ".png"); }
-  static inline bool isPngFile(const std::string& path) { return isPngFile(path.c_str()); }
+/**
+ * Check if the given filename ends with the specified extension (case-insensitive).
+ */
+bool checkFileExtension(std::string_view fileName, const char* extension);
+inline bool checkFileExtension(const String& fileName, const char* extension) {
+  return checkFileExtension(std::string_view{fileName.c_str(), fileName.length()}, extension);
+}
 
-  static inline bool isBmpFile(const char* path) { return hasExtension(path, ".bmp"); }
-  static inline bool isBmpFile(const std::string& path) { return isBmpFile(path.c_str()); }
+// Check for either .jpg or .jpeg extension (case-insensitive)
+bool hasJpgExtension(std::string_view fileName);
+inline bool hasJpgExtension(const String& fileName) {
+  return hasJpgExtension(std::string_view{fileName.c_str(), fileName.length()});
+}
 
-  static inline bool isImageFile(const char* path) { return isJpegFile(path) || isPngFile(path) || isBmpFile(path); }
-  static inline bool isImageFile(const std::string& path) { return isImageFile(path.c_str()); }
+// Check for .png extension (case-insensitive)
+bool hasPngExtension(std::string_view fileName);
+inline bool hasPngExtension(const String& fileName) {
+  return hasPngExtension(std::string_view{fileName.c_str(), fileName.length()});
+}
 
-  // Book formats
-  static inline bool isEpubFile(const char* path) { return hasExtension(path, ".epub"); }
-  static inline bool isEpubFile(const std::string& path) { return isEpubFile(path.c_str()); }
+// Check for .bmp extension (case-insensitive)
+bool hasBmpExtension(std::string_view fileName);
 
-  static inline bool isXtcFile(const char* path) { return hasExtension(path, ".xtc") || hasExtension(path, ".xtch"); }
-  static inline bool isXtcFile(const std::string& path) { return isXtcFile(path.c_str()); }
+// Check for .gif extension (case-insensitive)
+bool hasGifExtension(std::string_view fileName);
+inline bool hasGifExtension(const String& fileName) {
+  return hasGifExtension(std::string_view{fileName.c_str(), fileName.length()});
+}
 
-  static inline bool isTxtFile(const char* path) { return hasExtension(path, ".txt") || hasExtension(path, ".text"); }
-  static inline bool isTxtFile(const std::string& path) { return isTxtFile(path.c_str()); }
+// Check for .epub extension (case-insensitive)
+bool hasEpubExtension(std::string_view fileName);
+inline bool hasEpubExtension(const String& fileName) {
+  return hasEpubExtension(std::string_view{fileName.c_str(), fileName.length()});
+}
 
-  static inline bool isMarkdownFile(const char* path) {
-    return hasExtension(path, ".md") || hasExtension(path, ".markdown");
-  }
-  static inline bool isMarkdownFile(const std::string& path) { return isMarkdownFile(path.c_str()); }
+// Check for either .xtc or .xtch extension (case-insensitive)
+bool hasXtcExtension(std::string_view fileName);
 
-  static inline bool isSupportedBookFile(const char* path) {
-    return isEpubFile(path) || isXtcFile(path) || isTxtFile(path) || isMarkdownFile(path);
-  }
-  static inline bool isSupportedBookFile(const std::string& path) { return isSupportedBookFile(path.c_str()); }
-};
+// Check for .txt extension (case-insensitive)
+bool hasTxtExtension(std::string_view fileName);
+inline bool hasTxtExtension(const String& fileName) {
+  return hasTxtExtension(std::string_view{fileName.c_str(), fileName.length()});
+}
+
+// Check for .md or .markdown extension (case-insensitive)
+bool hasMarkdownExtension(std::string_view fileName);
+
+// Check for .css extension (case-insensitive)
+bool hasCssExtension(std::string_view fileName);
+inline bool hasCssExtension(const String& fileName) {
+  return hasCssExtension(std::string_view{fileName.c_str(), fileName.length()});
+}
+std::string extractFolderPath(const std::string& filePath);
+
+/**
+ * Sanitize a filename/path component for FAT32 in a caller-provided buffer.
+ * Replaces invalid path characters, spaces, and control characters with '-'.
+ */
+void sanitizePathComponentForFat32(const char* input, char* output, size_t maxLen);
+
+}  // namespace FsHelpers

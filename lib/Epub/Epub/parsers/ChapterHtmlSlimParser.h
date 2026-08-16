@@ -1,165 +1,244 @@
 #pragma once
 
+#include <HalStorage.h>
 #include <expat.h>
 
 #include <climits>
-#include <cstring>
+#include <cstdint>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "../FootnoteEntry.h"
 #include "../ParsedText.h"
-#include "../RenderConfig.h"
 #include "../blocks/ImageBlock.h"
 #include "../blocks/TextBlock.h"
+#include "../converters/ImageToFramebufferDecoder.h"
 #include "../css/CssParser.h"
-#include "DataUriStripper.h"
+#include "../css/CssStyle.h"
 
 class Page;
 class GfxRenderer;
-class Print;
+class Epub;
 
 #define MAX_WORD_SIZE 200
-constexpr int MAX_XML_DEPTH = 100;
 
 class ChapterHtmlSlimParser {
-  const std::string filepath;
+ public:
+  struct ParagraphLutEntry {
+    uint32_t xhtmlByteOffset = 0;
+    uint16_t paragraphIndex = 0;
+    uint16_t listItemIndex = 0;
+  };
+
+ private:
+  static constexpr uint8_t MAX_SIMPLE_TABLE_COLUMNS = 8;
+  static constexpr uint16_t MAX_SIMPLE_TABLE_ROWS = 64;
+  static constexpr uint16_t MAX_SIMPLE_TABLE_CELLS = 64;
+  static constexpr uint16_t MAX_SIMPLE_TABLE_CELL_WORDS = 160;
+  static constexpr uint8_t MAX_GRID_TABLES_PER_CHAPTER = 4;
+  static constexpr uint8_t TABLE_CELL_PADDING = 6;
+
+  std::shared_ptr<Epub> epub;
+  const std::string& filepath;
   GfxRenderer& renderer;
-  std::function<bool(std::unique_ptr<Page>)> completePageFn;  // Returns false to stop parsing
-  std::function<void(int)> progressFn;                        // Progress callback (0-100)
+  std::function<void(std::unique_ptr<Page>, ParagraphLutEntry)> completePageFn;
+  std::function<void()> popupFn;      // Popup callback
+  XML_Parser activeParser = nullptr;  // Expat parser used to capture byte offsets for sync LUT hints
+  XML_Parser xmlParser_ = nullptr;
+  HalFile parseFile_;
+  uint32_t parseStartTime_ = 0;
   int depth = 0;
   int skipUntilDepth = INT_MAX;
-  bool insideBody_ = false;  // Don't emit text before <body>
   int boldUntilDepth = INT_MAX;
   int italicUntilDepth = INT_MAX;
-  int cssBoldUntilDepth = INT_MAX;
-  int cssItalicUntilDepth = INT_MAX;
   int underlineUntilDepth = INT_MAX;
-  int strikethroughUntilDepth = INT_MAX;
-  int cssUnderlineUntilDepth = INT_MAX;
-  int cssStrikethroughUntilDepth = INT_MAX;
+  int strikeUntilDepth = INT_MAX;
   // buffer for building up words from characters, will auto break if longer than this
   // leave one char at end for null pointer
   char partWordBuffer[MAX_WORD_SIZE + 1] = {};
   int partWordBufferIndex = 0;
+  bool nextWordContinues = false;  // true when next flushed word attaches to previous (inline element boundary)
   std::unique_ptr<ParsedText> currentTextBlock = nullptr;
+  bool inRuby = false;
+  int rubyStartWordIndex = -1;
+  bool collectingRubyText = false;
+  std::string rubyTextBuffer;
   std::unique_ptr<Page> currentPage = nullptr;
   int16_t currentPageNextY = 0;
-  RenderConfig config;
+  int fontId;
+  float lineCompression;
+  bool extraParagraphSpacing;
+  bool forceParagraphIndents;
+  uint8_t paragraphAlignment;
+  uint16_t viewportWidth;
+  uint16_t viewportHeight;
+  bool hyphenationEnabled;
+  bool focusReadingEnabled;
+  CssParser* cssParser;
+  bool embeddedStyle;
+  uint8_t imageRendering;
+  std::string contentBase;
+  std::string imageBasePath;
+  int imageCounter = 0;
+  bool lowMemoryImageFallback = false;
+  bool lowMemoryAbort = false;
+  bool attemptedTextLayoutFontCacheRelease = false;
+  bool loggedSoftLowMemoryContinuation = false;
 
-  // Image support
-  std::string chapterBasePath;
-  std::string imageCachePath;
-  std::function<bool(const std::string&, Print&, size_t)> readItemFn;
+  std::string lastImageDimensionsPath;
+  ImageDimensions lastImageDimensions = {0, 0};
+  bool hasLastImageDimensions = false;
+  std::string lastRenderedImagePath;
+  uint16_t lastRenderedImageCount = 0;
+  uint32_t lastLongParseServiceMs = 0;
 
-  // CSS support
-  const CssParser* cssParser_ = nullptr;
-
-  // XML parser handle for stopping mid-parse
-  XML_Parser xmlParser_ = nullptr;
-  bool stopRequested_ = false;
-  // Soft-stop flag: caller's batch budget (maxPages) was reached, but we keep
-  // extracting lines from the current text block to avoid losing words still
-  // in the words list. XML is suspended at the next clean boundary (end of
-  // makePages / addImageToPage), so currentTextBlock is empty when the
-  // outer XML callback returns and startNewTextBlock can safely reset it.
-  // See paragraph-truncation bug report.
-  bool pendingMaxPagesSuspend_ = false;
-  bool pendingEmergencySplit_ = false;
-  bool pendingRtl_ = false;
-  int rtlUntilDepth_ = INT_MAX;
-  int16_t pendingTextIndentPx_ = 0;  // CSS text-indent for current block
-  bool aborted_ = false;
-
-  // External abort callback for cooperative cancellation
-  std::function<bool()> externalAbortCallback_ = nullptr;
-
-  // Image failure rate limiting - skip remaining images after consecutive failures
-  uint8_t consecutiveImageFailures_ = 0;
-  static constexpr uint8_t MAX_CONSECUTIVE_IMAGE_FAILURES = 3;
-
-  // Table parsing state
-  struct TableCell {
-    std::string text;
-    bool isHeader = false;
+  // Style tracking (replaces depth-based approach)
+  struct StyleStackEntry {
+    int depth = 0;
+    bool hasBold = false, bold = false;
+    bool hasItalic = false, italic = false;
+    bool hasUnderline = false, underline = false;
+    bool hasStrikeThrough = false, strikeThrough = false;
+    bool hasSup = false, sup = false;
+    bool hasSub = false, sub = false;
   };
-  bool inTable_ = false;
-  bool inTableCell_ = false;
-  bool inTableCaption_ = false;
-  std::string tableCaption_;
-  int nestedTableDepth_ = 0;  // Track nested tables to skip them
-  std::vector<std::vector<TableCell>> tableRows_;
-  void renderTable();
-  std::string trimWhitespace(const std::string& s);
-  std::string truncateToFit(const std::string& text, int maxWidth, EpdFontFamily::Style style);
+  std::vector<StyleStackEntry> inlineStyleStack;
+  std::vector<BlockStyle> blockStyleStack;  // accumulated block styles from open ancestor elements
+  CssStyle currentCssStyle;
+  bool effectiveBold = false;
+  bool effectiveItalic = false;
+  bool effectiveUnderline = false;
+  bool effectiveStrikeThrough = false;
+  bool effectiveSup = false;
+  bool effectiveSub = false;
 
-  // Parser safety - timeout and memory checks
-  uint32_t parseStartTime_ = 0;
-  uint16_t loopCounter_ = 0;
-  uint16_t pagesCreated_ = 0;
-  uint16_t elementCounter_ = 0;
-  bool cssHeapOk_ = true;
-  static constexpr uint32_t MAX_PARSE_TIME_MS = 20000;     // 20 second timeout
-  static constexpr uint16_t YIELD_CHECK_INTERVAL = 100;    // Check every 100 iterations
-  static constexpr uint16_t CSS_HEAP_CHECK_INTERVAL = 64;  // Check heap for CSS every 64 elements
-  static constexpr size_t MIN_FREE_HEAP = 1024;             // 1KB minimum free heap (DP arrays use arena)
+  struct BufferedTableCell {
+    std::unique_ptr<ParsedText> text;
+    std::vector<std::pair<int, FootnoteEntry>> footnotes;
+    bool isHeader = false;
+    uint8_t colSpan = 1;
+  };
 
-  // Pre-parse data URI stripper to prevent expat OOM on large embedded images
-  DataUriStripper dataUriStripper_;
+  struct BufferedTableRow {
+    std::vector<BufferedTableCell> cells;
+    bool hasHeaderCell = false;
+    bool hasDataCell = false;
+    uint16_t effectiveColumnCount = 0;
+  };
 
-  // Anchor-to-page mapping: element id → page index (0-based)
-  std::vector<std::pair<std::string, uint16_t>> anchorMap_;
+  struct BufferedTable {
+    BlockStyle blockStyle;
+    std::vector<BufferedTableRow> rows;
+    uint16_t maxCols = 0;
+    uint16_t totalCells = 0;
+    bool unsupported = false;
+  };
 
-  // Check if parsing should abort due to timeout or memory pressure
-  bool shouldAbort() const;
+  int tableDepth = 0;
+  int tableRowIndex = 0;
+  int tableColIndex = 0;
+  uint8_t tableGridCandidatesInChapter = 0;
+  bool currentTableCellIsHeader = false;
+  uint8_t currentTableCellColSpan = 1;
+  std::unique_ptr<BufferedTable> currentTableBuffer = nullptr;
+  bool listItemBulletOnly = false;  // true when currentTextBlock has only the <li> bullet
 
-  void startNewTextBlock(TextBlock::BLOCK_STYLE style);
+  // Anchor-to-page mapping: tracks which page each HTML id attribute lands on
+  int completedPageCount = 0;
+  std::deque<std::pair<std::string, uint16_t>> anchorData;
+  std::string pendingAnchorId;          // deferred until after previous text block is flushed
+  std::vector<std::string> tocAnchors;  // the list of anchors that are TOC chapter boundaries
+  std::vector<std::string> referencedAnchors;
+  int xpathBodyDepth = -1;
+  uint32_t lastBodyChildByteOffset = 0;
+  uint16_t xpathParagraphIndex = 0;
+  uint16_t xpathListItemIndex = 0;
+
+  // Footnote link tracking
+  bool insideFootnoteLink = false;
+  int footnoteLinkDepth = -1;
+  FootnoteEntry currentFootnote = {};
+  int currentFootnoteLinkTextLen = 0;
+  std::vector<std::pair<int, FootnoteEntry>> pendingFootnotes;  // <wordIndex, entry>
+  int wordsExtractedInBlock = 0;
+
+  void updateEffectiveInlineStyle();
+  bool shouldAbortForLowMemory(const char* stage);
+  bool startNewPage(const char* reason);
+  void collectReferencedAnchors();
+  void collectReferencedAnchor(const char* href);
+  bool isReferencedAnchor(const std::string& anchor) const;
+  bool shouldRecordAnchor(const char* elementName, const std::string& anchor) const;
+  bool readImageDimensions(const std::string& resolvedPath, const std::string& cachedImagePath, ImageDimensions& dims);
+  bool shouldSuppressRepeatedImage(const std::string& resolvedPath);
+  void serviceLongParse(const char* stage);
+  void startNewTextBlock(const BlockStyle& blockStyle);
+  void flushPendingAnchor();
   void flushPartWordBuffer();
+  void flushLongTextBlockIfNeeded();
   void makePages();
-  std::string cacheImage(const std::string& src);
-  void addImageToPage(std::shared_ptr<ImageBlock> image);
+  void emitPage(uint32_t xhtmlByteOffset);
+  void emitHorizontalRule(const BlockStyle& blockStyle);
+  void finalizeCurrentTableCell();
+  void emitBufferedTableAsParagraphs(BufferedTable& table);
+  void emitBufferedTableAsFragments(BufferedTable& table);
+  void emitCurrentTableBuffer();
+  void fallbackCurrentTableBufferToParagraphs(const char* reason);
+  void fallbackCurrentTableBufferIfNeeded(const char* stage);
   // XML callbacks
   static void XMLCALL startElement(void* userData, const XML_Char* name, const XML_Char** atts);
   static void XMLCALL characterData(void* userData, const XML_Char* s, int len);
+  static void XMLCALL defaultHandlerExpand(void* userData, const XML_Char* s, int len);
   static void XMLCALL endElement(void* userData, const XML_Char* name);
-  static void XMLCALL defaultHandler(void* userData, const XML_Char* s, int len);
-
-  // Suspend/resume state
-  FsFile file_;
-  size_t totalSize_ = 0;
-  size_t bytesRead_ = 0;
-  int lastProgress_ = -1;
-  bool suspended_ = false;  // True when parser is suspended mid-parse (can resume)
-
-  bool initParser();
-  bool parseLoop();
-  void cleanupParser();
 
  public:
-  explicit ChapterHtmlSlimParser(const std::string& filepath, GfxRenderer& renderer, const RenderConfig& config,
-                                 const std::function<bool(std::unique_ptr<Page>)>& completePageFn,
-                                 const std::function<void(int)>& progressFn = nullptr,
-                                 const std::string& chapterBasePath = "", const std::string& imageCachePath = "",
-                                 const std::function<bool(const std::string&, Print&, size_t)>& readItemFn = nullptr,
-                                 const CssParser* cssParser = nullptr,
-                                 const std::function<bool()>& externalAbortCallback = nullptr)
-      : filepath(filepath),
+  explicit ChapterHtmlSlimParser(std::shared_ptr<Epub> epub, const std::string& filepath, GfxRenderer& renderer,
+                                 const int fontId, const float lineCompression, const bool extraParagraphSpacing,
+                                 const bool forceParagraphIndents, const uint8_t paragraphAlignment,
+                                 const uint16_t viewportWidth, const uint16_t viewportHeight,
+                                 const bool hyphenationEnabled, const bool focusReadingEnabled,
+                                 const std::function<void(std::unique_ptr<Page>, ParagraphLutEntry)>& completePageFn,
+                                 const bool embeddedStyle, const std::string& contentBase,
+                                 const std::string& imageBasePath, const uint8_t imageRendering = 0,
+                                 std::vector<std::string> tocAnchors = {},
+                                 const std::function<void()>& popupFn = nullptr, CssParser* cssParser = nullptr)
+
+      : epub(epub),
+        filepath(filepath),
         renderer(renderer),
-        config(config),
+        fontId(fontId),
+        lineCompression(lineCompression),
+        extraParagraphSpacing(extraParagraphSpacing),
+        forceParagraphIndents(forceParagraphIndents),
+        paragraphAlignment(paragraphAlignment),
+        viewportWidth(viewportWidth),
+        viewportHeight(viewportHeight),
+        hyphenationEnabled(hyphenationEnabled),
+        focusReadingEnabled(focusReadingEnabled),
         completePageFn(completePageFn),
-        progressFn(progressFn),
-        chapterBasePath(chapterBasePath),
-        imageCachePath(imageCachePath),
-        readItemFn(readItemFn),
-        cssParser_(cssParser),
-        externalAbortCallback_(externalAbortCallback) {}
+        popupFn(popupFn),
+        cssParser(cssParser),
+        embeddedStyle(embeddedStyle),
+        imageRendering(imageRendering),
+        contentBase(contentBase),
+        imageBasePath(imageBasePath),
+        tocAnchors(std::move(tocAnchors)) {}
+
   ~ChapterHtmlSlimParser();
   bool parseAndBuildPages();
-  bool resumeParsing();
-  bool isSuspended() const { return suspended_; }
+  enum class ParseStatus { More, Done, Error };
+  bool beginParse();
+  ParseStatus parseStep();
+  bool finishParse();
+  void abortParse();
+  size_t parseBytesConsumed() { return parseFile_ ? parseFile_.position() : 0; }
+  size_t parseTotalBytes() { return parseFile_ ? parseFile_.size() : 0; }
   void addLineToPage(std::shared_ptr<TextBlock> line);
-  bool wasAborted() const { return aborted_; }
-  const std::vector<std::pair<std::string, uint16_t>>& getAnchorMap() const { return anchorMap_; }
+  const std::deque<std::pair<std::string, uint16_t>>& getAnchors() const { return anchorData; }
+  bool wasLowMemoryFallbackTriggered() const { return lowMemoryImageFallback; }
+  bool wasLowMemoryAbortTriggered() const { return lowMemoryAbort; }
 };

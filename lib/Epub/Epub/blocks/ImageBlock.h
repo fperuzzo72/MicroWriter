@@ -1,37 +1,41 @@
 #pragma once
-
-#include <SdFat.h>
+#include <HalStorage.h>
 
 #include <memory>
 #include <string>
 
 #include "Block.h"
 
-class GfxRenderer;
-
 class ImageBlock final : public Block {
-  std::string cachedBmpPath;
-  uint16_t width;
-  uint16_t height;
-
  public:
-  explicit ImageBlock(std::string path, const uint16_t w, const uint16_t h)
-      : cachedBmpPath(std::move(path)), width(w), height(h) {}
+  ImageBlock(const std::string& imagePath, int16_t width, int16_t height);
+  ImageBlock(const std::string& imagePath, int16_t width, int16_t height, std::string sourceEpubPath,
+             std::string sourceItemHref);
   ~ImageBlock() override = default;
 
+  const std::string& getImagePath() const { return imagePath; }
+  int16_t getWidth() const { return width; }
+  int16_t getHeight() const { return height; }
+
+  bool imageExists() const;
+  bool hasValidCache() const;
+  bool needsDecode() const;
+  void renderPlaceholder(GfxRenderer& renderer, int x, int y) const;
+  static void clearSessionRenderFailures();
+
   BlockType getType() override { return IMAGE_BLOCK; }
-  bool isEmpty() override { return cachedBmpPath.empty(); }
-  void layout(GfxRenderer& renderer) override {}
+  bool isEmpty() override { return false; }
 
-  uint16_t getWidth() const { return width; }
-  uint16_t getHeight() const { return height; }
-  const std::string& getCachedBmpPath() const { return cachedBmpPath; }
-
-  void render(GfxRenderer& renderer, int fontId, int x, int y) const;
-  bool serialize(FsFile& file) const;
+  void render(GfxRenderer& renderer, const int x, const int y);
+  bool serialize(FsFile& file);
   static std::unique_ptr<ImageBlock> deserialize(FsFile& file);
 
-  // Global placeholder mode — set by ReaderState before rendering.
-  // When true, render() draws a bordered box instead of loading the BMP.
-  static bool placeholderMode;
+ private:
+  std::string imagePath;
+  std::string sourceEpubPath;
+  std::string sourceItemHref;
+  int16_t width;
+  int16_t height;
+
+  bool extractLazyImageIfNeeded();
 };

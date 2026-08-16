@@ -2,18 +2,22 @@
  * XtcParser.cpp
  *
  * XTC file parsing implementation
- * XTC ebook format (originally from CrossPoint Reader)
+ * XTC ebook support for CrossPoint Reader
  */
 
 #include "XtcParser.h"
 
 #include <FsHelpers.h>
-#include <HardwareSerial.h>
-#include <SDCardManager.h>
+#include <HalStorage.h>
+#include <Logging.h>
 
 #include <cstring>
 
 namespace xtc {
+
+namespace {
+constexpr size_t MAX_XTC_CHAPTERS = 256;
+}  // namespace
 
 XtcParser::XtcParser()
     : m_isOpen(false),
@@ -21,6 +25,7 @@ XtcParser::XtcParser()
       m_defaultHeight(DISPLAY_HEIGHT),
       m_bitDepth(1),
       m_hasChapters(false),
+      m_chaptersLoaded(false),
       m_lastError(XtcError::OK) {
   memset(&m_header, 0, sizeof(m_header));
 }
@@ -33,8 +38,10 @@ XtcError XtcParser::open(const char* filepath) {
     close();
   }
 
+  m_filepath = filepath;
+
   // Open file
-  if (!SdMan.openFileForRead("XTC", filepath, m_file)) {
+  if (!Storage.openFileForRead("XTC", filepath, m_file)) {
     m_lastError = XtcError::FILE_NOT_FOUND;
     return m_lastError;
   }
@@ -42,43 +49,63 @@ XtcError XtcParser::open(const char* filepath) {
   // Read header
   m_lastError = readHeader();
   if (m_lastError != XtcError::OK) {
-    Serial.printf("[%lu] [XTC] Failed to read header: %s\n", millis(), errorToString(m_lastError));
+    LOG_DBG("XTC", "Failed to read header: %s", errorToString(m_lastError));
+    // Explicit close() required: member variable persists beyond function scope
     m_file.close();
     return m_lastError;
   }
 
-  // Read title and author if available
-  readTitle();
-  readAuthor();
+  // Read title & author if available
+  if (m_header.hasMetadata) {
+    m_lastError = readTitle();
+    if (m_lastError != XtcError::OK) {
+      LOG_DBG("XTC", "Failed to read title: %s", errorToString(m_lastError));
+      // Explicit close() required: member variable persists beyond function scope
+      m_file.close();
+      return m_lastError;
+    }
+    m_lastError = readAuthor();
+    if (m_lastError != XtcError::OK) {
+      LOG_DBG("XTC", "Failed to read author: %s", errorToString(m_lastError));
+      // Explicit close() required: member variable persists beyond function scope
+      m_file.close();
+      return m_lastError;
+    }
+    // Trim excess capacity from metadata strings
+    m_title.shrink_to_fit();
+    m_author.shrink_to_fit();
+  }
 
-  // Read page table
-  m_lastError = readPageTable();
+  // Read first page info for default dimensions. Other page-table entries are
+  // read on demand, avoiding pageCount * sizeof(PageTableEntry) heap use.
+  m_lastError = readFirstPageInfo();
   if (m_lastError != XtcError::OK) {
-    Serial.printf("[%lu] [XTC] Failed to read page table: %s\n", millis(), errorToString(m_lastError));
+    LOG_DBG("XTC", "Failed to read first page info: %s", errorToString(m_lastError));
+    // Explicit close() required: member variable persists beyond function scope
     m_file.close();
     return m_lastError;
   }
 
-  // Read chapters if present
-  m_lastError = readChapters();
-  if (m_lastError != XtcError::OK) {
-    Serial.printf("[%lu] [XTC] Failed to read chapters: %s\n", millis(), errorToString(m_lastError));
-    m_file.close();
-    return m_lastError;
-  }
+  // Defer chapter parsing until actually needed. Chapter strings can use
+  // significant heap, and most page renders do not need them.
+  // Older XTC files start the page table at 0x30, so they do not have the later
+  // chapterOffset field even if the bytes read into that slot are non-zero.
+  m_hasChapters = (m_header.hasChapters == 1 && m_header.pageTableOffset >= sizeof(XtcHeader));
+  m_chaptersLoaded = false;
+
+  // Close the source file to free SdFat buffers before the reader allocates
+  // the page bitmap buffer.
+  m_file.close();
 
   m_isOpen = true;
-  Serial.printf("[%lu] [XTC] Opened file: %s (%u pages, %dx%d)\n", millis(), filepath, m_header.pageCount,
-                m_defaultWidth, m_defaultHeight);
+  LOG_DBG("XTC", "Opened file: %s (%u pages, %dx%d)", filepath, m_header.pageCount, m_defaultWidth, m_defaultHeight);
   return XtcError::OK;
 }
 
 void XtcParser::close() {
-  if (m_isOpen) {
-    m_file.close();
-    m_isOpen = false;
-  }
-  m_pageTable.clear();
+  closeFile();
+  m_isOpen = false;
+  m_chaptersLoaded = false;
   m_chapters.clear();
   m_title.clear();
   m_author.clear();
@@ -86,21 +113,29 @@ void XtcParser::close() {
   memset(&m_header, 0, sizeof(m_header));
 }
 
+bool XtcParser::ensureFileOpen() {
+  if (m_file.isOpen()) {
+    return true;
+  }
+  return !m_filepath.empty() && Storage.openFileForRead("XTC", m_filepath.c_str(), m_file);
+}
+
+void XtcParser::closeFile() {
+  if (m_file.isOpen()) {
+    m_file.close();
+  }
+}
+
 XtcError XtcParser::readHeader() {
   // Read first 56 bytes of header
-  const int bytesRead = m_file.read(reinterpret_cast<uint8_t*>(&m_header), sizeof(XtcHeader));
-  if (bytesRead < 0) {
-    Serial.printf("[XTC] Read error at line %d\n", __LINE__);
-    return XtcError::READ_ERROR;
-  }
-  if (static_cast<size_t>(bytesRead) != sizeof(XtcHeader)) {
+  size_t bytesRead = m_file.read(reinterpret_cast<uint8_t*>(&m_header), sizeof(XtcHeader));
+  if (bytesRead != sizeof(XtcHeader)) {
     return XtcError::READ_ERROR;
   }
 
   // Verify magic number (accept both XTC and XTCH)
   if (m_header.magic != XTC_MAGIC && m_header.magic != XTCH_MAGIC) {
-    Serial.printf("[%lu] [XTC] Invalid magic: 0x%08X (expected 0x%08X or 0x%08X)\n", millis(), m_header.magic,
-                  XTC_MAGIC, XTCH_MAGIC);
+    LOG_DBG("XTC", "Invalid magic: 0x%08X (expected 0x%08X or 0x%08X)", m_header.magic, XTC_MAGIC, XTCH_MAGIC);
     return XtcError::INVALID_MAGIC;
   }
 
@@ -113,7 +148,7 @@ XtcError XtcParser::readHeader() {
   const bool validVersion = m_header.versionMajor == 1 && m_header.versionMinor == 0 ||
                             m_header.versionMajor == 0 && m_header.versionMinor == 1;
   if (!validVersion) {
-    Serial.printf("[%lu] [XTC] Unsupported version: %u.%u\n", millis(), m_header.versionMajor, m_header.versionMinor);
+    LOG_DBG("XTC", "Unsupported version: %u.%u", m_header.versionMajor, m_header.versionMinor);
     return XtcError::INVALID_VERSION;
   }
 
@@ -122,120 +157,121 @@ XtcError XtcParser::readHeader() {
     return XtcError::CORRUPTED_HEADER;
   }
 
-  Serial.printf("[%lu] [XTC] Header: magic=0x%08X (%s), ver=%u.%u, pages=%u, bitDepth=%u\n", millis(), m_header.magic,
-                (m_header.magic == XTCH_MAGIC) ? "XTCH" : "XTC", m_header.versionMajor, m_header.versionMinor,
-                m_header.pageCount, m_bitDepth);
+  LOG_DBG("XTC", "Header: magic=0x%08X (%s), ver=%u.%u, pages=%u, bitDepth=%u", m_header.magic,
+          (m_header.magic == XTCH_MAGIC) ? "XTCH" : "XTC", m_header.versionMajor, m_header.versionMinor,
+          m_header.pageCount, m_bitDepth);
 
   return XtcError::OK;
 }
 
 XtcError XtcParser::readTitle() {
-  // Title is usually at offset 0x38 (56) for 88-byte headers
-  // Read title as null-terminated UTF-8 string
-  if (m_header.titleOffset == 0) {
-    m_header.titleOffset = 0x38;  // Default offset
-  }
-
-  if (!m_file.seek(m_header.titleOffset)) {
+  constexpr auto titleOffset = 0x38;
+  if (!m_file.seek(titleOffset)) {
     return XtcError::READ_ERROR;
   }
 
   char titleBuf[128] = {0};
-  const int bytesRead = m_file.read(reinterpret_cast<uint8_t*>(titleBuf), sizeof(titleBuf) - 1);
-  if (bytesRead <= 0) {
-    Serial.printf("[%lu] [XTC] Warning: Failed to read title (read returned %d)\n", millis(), bytesRead);
-  }
+  m_file.read(titleBuf, sizeof(titleBuf) - 1);
   m_title = titleBuf;
 
-  Serial.printf("[%lu] [XTC] Title: %s\n", millis(), m_title.c_str());
+  LOG_DBG("XTC", "Title: %s", m_title.c_str());
   return XtcError::OK;
 }
 
 XtcError XtcParser::readAuthor() {
-  // Author is at offset 0xB8, directly following title (which ends at 0x38 + 128 = 0xB8)
-  constexpr uint32_t authorOffset = 0xB8;
+  // Read author as null-terminated UTF-8 string with max length 64, directly following title
+  constexpr auto authorOffset = 0xB8;
   if (!m_file.seek(authorOffset)) {
-    return XtcError::OK;  // Author is optional
-  }
-
-  char authorBuf[64] = {0};
-  const int bytesRead = m_file.read(reinterpret_cast<uint8_t*>(authorBuf), sizeof(authorBuf) - 1);
-  if (bytesRead <= 0) {
-    return XtcError::OK;  // Author is optional
-  }
-
-  // Validate that the string looks like text (not garbage data)
-  // Check first few bytes for printable ASCII or valid UTF-8 lead bytes
-  const auto* p = reinterpret_cast<const uint8_t*>(authorBuf);
-  if (p[0] == 0 || (p[0] < 0x20 && p[0] != '\t') || p[0] == 0x7F) {
-    return XtcError::OK;  // Starts with control char or null - likely not valid author data
-  }
-
-  m_author = authorBuf;
-
-  if (!m_author.empty()) {
-    Serial.printf("[%lu] [XTC] Author: %s\n", millis(), m_author.c_str());
-  }
-  return XtcError::OK;
-}
-
-XtcError XtcParser::readPageTable() {
-  if (m_header.pageTableOffset == 0) {
-    Serial.printf("[%lu] [XTC] Page table offset is 0, cannot read\n", millis());
-    return XtcError::CORRUPTED_HEADER;
-  }
-
-  // Seek to page table
-  if (!m_file.seek(m_header.pageTableOffset)) {
-    Serial.printf("[%lu] [XTC] Failed to seek to page table at %llu\n", millis(), m_header.pageTableOffset);
     return XtcError::READ_ERROR;
   }
 
-  // Sanity cap on pageCount to prevent OOM on corrupt headers. The field is
-  // uint16_t, so an untrusted value could reach 65535 — reserving ~1.6 MB
-  // of PageTableEntry, which won't fit in ESP32-C3's 380 KB of heap.
-  constexpr uint16_t kMaxXtcPages = 4096;
-  if (m_header.pageCount > kMaxXtcPages) {
-    Serial.printf("[%lu] [XTC] Implausible pageCount %u (max %u), rejecting\n",
-                  millis(), m_header.pageCount, kMaxXtcPages);
-    return XtcError::CORRUPTED_HEADER;
-  }
+  char authorBuf[64] = {0};
+  m_file.read(authorBuf, sizeof(authorBuf) - 1);
+  m_author = authorBuf;
 
-  m_pageTable.resize(m_header.pageCount);
-
-  // Read page table entries
-  for (uint16_t i = 0; i < m_header.pageCount; i++) {
-    PageTableEntry entry;
-    const int bytesRead = m_file.read(reinterpret_cast<uint8_t*>(&entry), sizeof(PageTableEntry));
-    if (bytesRead < 0) {
-      Serial.printf("[XTC] Read error at line %d (page table entry %u)\n", __LINE__, i);
-      return XtcError::READ_ERROR;
-    }
-    if (static_cast<size_t>(bytesRead) != sizeof(PageTableEntry)) {
-      Serial.printf("[%lu] [XTC] Failed to read page table entry %u\n", millis(), i);
-      return XtcError::READ_ERROR;
-    }
-
-    m_pageTable[i].offset = static_cast<uint32_t>(entry.dataOffset);
-    m_pageTable[i].size = entry.dataSize;
-    m_pageTable[i].width = entry.width;
-    m_pageTable[i].height = entry.height;
-    m_pageTable[i].bitDepth = m_bitDepth;
-
-    // Update default dimensions from first page
-    if (i == 0) {
-      m_defaultWidth = entry.width;
-      m_defaultHeight = entry.height;
-    }
-  }
-
-  Serial.printf("[%lu] [XTC] Read %u page table entries\n", millis(), m_header.pageCount);
+  LOG_DBG("XTC", "Author: %s", m_author.c_str());
   return XtcError::OK;
 }
 
+XtcError XtcParser::readFirstPageInfo() {
+  if (m_header.pageTableOffset == 0) {
+    LOG_DBG("XTC", "Page table offset is 0, cannot read");
+    return XtcError::CORRUPTED_HEADER;
+  }
+
+  // Verify the file is large enough to contain the full page table
+  const uint64_t fileSize = m_file.fileSize64();
+  const uint64_t pageTableSize = static_cast<uint64_t>(m_header.pageCount) * sizeof(PageTableEntry);
+  if (m_header.pageTableOffset < XTC_LEGACY_HEADER_SIZE || m_header.pageTableOffset > fileSize ||
+      pageTableSize > fileSize - m_header.pageTableOffset) {
+    LOG_DBG("XTC",
+            "Page table exceeds file bounds: file=%llu tableOffset=%llu tableSize=%llu pages=%u entrySize=%u "
+            "dataOffset=%llu minTableOffset=%llu",
+            static_cast<unsigned long long>(fileSize), static_cast<unsigned long long>(m_header.pageTableOffset),
+            static_cast<unsigned long long>(pageTableSize), m_header.pageCount,
+            static_cast<unsigned int>(sizeof(PageTableEntry)), static_cast<unsigned long long>(m_header.dataOffset),
+            static_cast<unsigned long long>(XTC_LEGACY_HEADER_SIZE));
+    return XtcError::CORRUPTED_HEADER;
+  }
+
+  if (!m_file.seek64(m_header.pageTableOffset)) {
+    LOG_DBG("XTC", "Failed to seek to page table at %llu", m_header.pageTableOffset);
+    return XtcError::READ_ERROR;
+  }
+
+  PageTableEntry entry;
+  const size_t bytesRead = m_file.read(reinterpret_cast<uint8_t*>(&entry), sizeof(PageTableEntry));
+  if (bytesRead != sizeof(PageTableEntry)) {
+    LOG_DBG("XTC", "Failed to read first page table entry");
+    return XtcError::READ_ERROR;
+  }
+
+  m_defaultWidth = entry.width;
+  m_defaultHeight = entry.height;
+
+  LOG_DBG("XTC", "Page table validated: %u pages, default %dx%d", m_header.pageCount, m_defaultWidth,
+          m_defaultHeight);
+  return XtcError::OK;
+}
+
+bool XtcParser::readPageTableEntry(uint32_t pageIndex, PageInfo& info) {
+  if (pageIndex >= m_header.pageCount) {
+    return false;
+  }
+
+  if (!ensureFileOpen()) {
+    LOG_DBG("XTC", "Failed to reopen file for page table read");
+    return false;
+  }
+
+  const uint64_t entryOffset = m_header.pageTableOffset + static_cast<uint64_t>(pageIndex) * sizeof(PageTableEntry);
+  if (!m_file.seek64(entryOffset)) {
+    LOG_DBG("XTC", "Failed to seek to page table entry %lu at %llu", pageIndex,
+            static_cast<unsigned long long>(entryOffset));
+    return false;
+  }
+
+  PageTableEntry entry;
+  const size_t bytesRead = m_file.read(reinterpret_cast<uint8_t*>(&entry), sizeof(PageTableEntry));
+  if (bytesRead != sizeof(PageTableEntry)) {
+    LOG_DBG("XTC", "Failed to read page table entry %lu", pageIndex);
+    return false;
+  }
+
+  info.offset = entry.dataOffset;
+  info.size = entry.dataSize;
+  info.width = entry.width;
+  info.height = entry.height;
+  info.bitDepth = m_bitDepth;
+  return true;
+}
+
 XtcError XtcParser::readChapters() {
-  m_hasChapters = false;
   m_chapters.clear();
+
+  if (!ensureFileOpen()) {
+    return XtcError::READ_ERROR;
+  }
 
   uint8_t hasChaptersFlag = 0;
   if (!m_file.seek(0x0B)) {
@@ -246,6 +282,7 @@ XtcError XtcParser::readChapters() {
   }
 
   if (hasChaptersFlag != 1) {
+    m_hasChapters = false;
     return XtcError::OK;
   }
 
@@ -258,24 +295,26 @@ XtcError XtcParser::readChapters() {
   }
 
   if (chapterOffset == 0) {
+    m_hasChapters = false;
     return XtcError::OK;
   }
 
-  const uint64_t fileSize = m_file.size();
+  const uint64_t fileSize = m_file.fileSize64();
   if (chapterOffset < sizeof(XtcHeader) || chapterOffset >= fileSize || chapterOffset + 96 > fileSize) {
+    m_hasChapters = false;
     return XtcError::OK;
   }
 
-  uint64_t maxOffset = 0;
-  if (m_header.pageTableOffset > chapterOffset) {
+  // Clamp maxOffset to fileSize so bogus header values can't inflate chapterCount
+  uint64_t maxOffset = fileSize;
+  if (m_header.pageTableOffset > chapterOffset && m_header.pageTableOffset <= fileSize) {
     maxOffset = m_header.pageTableOffset;
-  } else if (m_header.dataOffset > chapterOffset) {
+  } else if (m_header.dataOffset > chapterOffset && m_header.dataOffset <= fileSize) {
     maxOffset = m_header.dataOffset;
-  } else {
-    maxOffset = fileSize;
   }
 
   if (maxOffset <= chapterOffset) {
+    m_hasChapters = false;
     return XtcError::OK;
   }
 
@@ -283,15 +322,25 @@ XtcError XtcParser::readChapters() {
   const uint64_t available = maxOffset - chapterOffset;
   const size_t chapterCount = static_cast<size_t>(available / chapterSize);
   if (chapterCount == 0) {
+    m_hasChapters = false;
     return XtcError::OK;
   }
 
-  if (!m_file.seek(chapterOffset)) {
+  if (!m_file.seek64(chapterOffset)) {
     return XtcError::READ_ERROR;
   }
 
+  const size_t chaptersToRead = chapterCount > MAX_XTC_CHAPTERS ? MAX_XTC_CHAPTERS : chapterCount;
+  if (chapterCount > MAX_XTC_CHAPTERS) {
+    LOG_DBG("XTC", "Chapter table has %u entries, limiting to %u", static_cast<unsigned int>(chapterCount),
+            static_cast<unsigned int>(MAX_XTC_CHAPTERS));
+  }
+
+  // Bounded reserve: chapterCount is derived from file offsets, so do not reserve
+  // an untrusted value on ESP32-C3's constrained heap.
+  m_chapters.reserve(chaptersToRead);
   std::vector<uint8_t> chapterBuf(chapterSize);
-  for (size_t i = 0; i < chapterCount; i++) {
+  for (size_t i = 0; i < chaptersToRead; i++) {
     if (m_file.read(chapterBuf.data(), chapterSize) != chapterSize) {
       return XtcError::READ_ERROR;
     }
@@ -299,19 +348,7 @@ XtcError XtcParser::readChapters() {
     char nameBuf[81];
     memcpy(nameBuf, chapterBuf.data(), 80);
     nameBuf[80] = '\0';
-    size_t nameLen = strnlen(nameBuf, 80);
-    // Walk back from the 80-byte cap so the chapter title doesn't end in
-    // the middle of a multi-byte UTF-8 codepoint. A CJK chapter title like
-    // "第一章：スタート" truncated at byte 80 would otherwise leak a broken
-    // lead byte into the TOC list and render as '?' on the device.
-    while (nameLen > 0
-           && (static_cast<unsigned char>(nameBuf[nameLen - 1]) & 0xC0) == 0x80) {
-      --nameLen;
-    }
-    if (nameLen > 0) {
-      const unsigned char lead = static_cast<unsigned char>(nameBuf[nameLen - 1]);
-      if (lead >= 0xC0) --nameLen;  // partial lead byte with no continuation
-    }
+    const size_t nameLen = strnlen(nameBuf, 80);
     std::string name(nameBuf, nameLen);
 
     uint16_t startPage = 0;
@@ -347,16 +384,24 @@ XtcError XtcParser::readChapters() {
   }
 
   m_hasChapters = !m_chapters.empty();
-  Serial.printf("[%lu] [XTC] Chapters: %u\n", millis(), static_cast<unsigned int>(m_chapters.size()));
+  LOG_DBG("XTC", "Chapters: %u", static_cast<unsigned int>(m_chapters.size()));
   return XtcError::OK;
 }
 
-bool XtcParser::getPageInfo(uint32_t pageIndex, PageInfo& info) const {
-  if (pageIndex >= m_pageTable.size()) {
-    return false;
+bool XtcParser::getPageInfo(uint32_t pageIndex, PageInfo& info) { return readPageTableEntry(pageIndex, info); }
+
+const std::vector<ChapterInfo>& XtcParser::getChapters() {
+  if (!m_chaptersLoaded && m_hasChapters) {
+    const XtcError err = readChapters();
+    if (err != XtcError::OK) {
+      LOG_ERR("XTC", "Failed to lazy-load chapters: %s", errorToString(err));
+      m_hasChapters = false;
+      m_chapters.clear();
+    }
+    m_chaptersLoaded = true;
+    closeFile();
   }
-  info = m_pageTable[pageIndex];
-  return true;
+  return m_chapters;
 }
 
 size_t XtcParser::loadPage(uint32_t pageIndex, uint8_t* buffer, size_t bufferSize) {
@@ -370,25 +415,32 @@ size_t XtcParser::loadPage(uint32_t pageIndex, uint8_t* buffer, size_t bufferSiz
     return 0;
   }
 
-  const PageInfo& page = m_pageTable[pageIndex];
+  PageInfo page;
+  if (!readPageTableEntry(pageIndex, page)) {
+    closeFile();
+    m_lastError = XtcError::READ_ERROR;
+    return 0;
+  }
+
+  if (!ensureFileOpen()) {
+    m_lastError = XtcError::FILE_NOT_FOUND;
+    return 0;
+  }
 
   // Seek to page data
-  if (!m_file.seek(page.offset)) {
-    Serial.printf("[%lu] [XTC] Failed to seek to page %u at offset %lu\n", millis(), pageIndex, page.offset);
+  if (!m_file.seek64(page.offset)) {
+    LOG_DBG("XTC", "Failed to seek to page %u at offset %llu", pageIndex, static_cast<unsigned long long>(page.offset));
+    closeFile();
     m_lastError = XtcError::READ_ERROR;
     return 0;
   }
 
   // Read page header (XTG for 1-bit, XTH for 2-bit - same structure)
   XtgPageHeader pageHeader;
-  const int headerRead = m_file.read(reinterpret_cast<uint8_t*>(&pageHeader), sizeof(XtgPageHeader));
-  if (headerRead < 0) {
-    Serial.printf("[XTC] Read error at line %d (page %u header)\n", __LINE__, pageIndex);
-    m_lastError = XtcError::READ_ERROR;
-    return 0;
-  }
-  if (static_cast<size_t>(headerRead) != sizeof(XtgPageHeader)) {
-    Serial.printf("[%lu] [XTC] Failed to read page header for page %u\n", millis(), pageIndex);
+  size_t headerRead = m_file.read(reinterpret_cast<uint8_t*>(&pageHeader), sizeof(XtgPageHeader));
+  if (headerRead != sizeof(XtgPageHeader)) {
+    LOG_DBG("XTC", "Failed to read page header for page %u", pageIndex);
+    closeFile();
     m_lastError = XtcError::READ_ERROR;
     return 0;
   }
@@ -396,8 +448,9 @@ size_t XtcParser::loadPage(uint32_t pageIndex, uint8_t* buffer, size_t bufferSiz
   // Verify page magic (XTG for 1-bit, XTH for 2-bit)
   const uint32_t expectedMagic = (m_bitDepth == 2) ? XTH_MAGIC : XTG_MAGIC;
   if (pageHeader.magic != expectedMagic) {
-    Serial.printf("[%lu] [XTC] Invalid page magic for page %u: 0x%08X (expected 0x%08X)\n", millis(), pageIndex,
-                  pageHeader.magic, expectedMagic);
+    LOG_DBG("XTC", "Invalid page magic for page %u: 0x%08X (expected 0x%08X)", pageIndex, pageHeader.magic,
+            expectedMagic);
+    closeFile();
     m_lastError = XtcError::INVALID_MAGIC;
     return 0;
   }
@@ -415,26 +468,24 @@ size_t XtcParser::loadPage(uint32_t pageIndex, uint8_t* buffer, size_t bufferSiz
 
   // Check buffer size
   if (bufferSize < bitmapSize) {
-    Serial.printf("[%lu] [XTC] Buffer too small: need %u, have %u\n", millis(), bitmapSize, bufferSize);
+    LOG_DBG("XTC", "Buffer too small: need %u, have %u", bitmapSize, bufferSize);
+    closeFile();
     m_lastError = XtcError::MEMORY_ERROR;
     return 0;
   }
 
   // Read bitmap data
-  const int bytesRead = m_file.read(buffer, bitmapSize);
-  if (bytesRead < 0) {
-    Serial.printf("[XTC] Read error at line %d (page %u bitmap)\n", __LINE__, pageIndex);
-    m_lastError = XtcError::READ_ERROR;
-    return 0;
-  }
-  if (static_cast<size_t>(bytesRead) != bitmapSize) {
-    Serial.printf("[%lu] [XTC] Page read error: expected %u, got %d\n", millis(), bitmapSize, bytesRead);
+  size_t bytesRead = m_file.read(buffer, bitmapSize);
+  if (bytesRead != bitmapSize) {
+    LOG_DBG("XTC", "Page read error: expected %u, got %u", bitmapSize, bytesRead);
+    closeFile();
     m_lastError = XtcError::READ_ERROR;
     return 0;
   }
 
+  closeFile();
   m_lastError = XtcError::OK;
-  return static_cast<size_t>(bytesRead);
+  return bytesRead;
 }
 
 XtcError XtcParser::loadPageStreaming(uint32_t pageIndex,
@@ -448,18 +499,28 @@ XtcError XtcParser::loadPageStreaming(uint32_t pageIndex,
     return XtcError::PAGE_OUT_OF_RANGE;
   }
 
-  const PageInfo& page = m_pageTable[pageIndex];
+  PageInfo page;
+  if (!readPageTableEntry(pageIndex, page)) {
+    closeFile();
+    return XtcError::READ_ERROR;
+  }
+
+  if (!ensureFileOpen()) {
+    return XtcError::FILE_NOT_FOUND;
+  }
 
   // Seek to page data
-  if (!m_file.seek(page.offset)) {
+  if (!m_file.seek64(page.offset)) {
+    closeFile();
     return XtcError::READ_ERROR;
   }
 
   // Read and skip page header (XTG for 1-bit, XTH for 2-bit)
   XtgPageHeader pageHeader;
-  const int headerRead = m_file.read(reinterpret_cast<uint8_t*>(&pageHeader), sizeof(XtgPageHeader));
+  size_t headerRead = m_file.read(reinterpret_cast<uint8_t*>(&pageHeader), sizeof(XtgPageHeader));
   const uint32_t expectedMagic = (m_bitDepth == 2) ? XTH_MAGIC : XTG_MAGIC;
-  if (headerRead < 0 || static_cast<size_t>(headerRead) != sizeof(XtgPageHeader) || pageHeader.magic != expectedMagic) {
+  if (headerRead != sizeof(XtgPageHeader) || pageHeader.magic != expectedMagic) {
+    closeFile();
     return XtcError::READ_ERROR;
   }
 
@@ -478,36 +539,33 @@ XtcError XtcParser::loadPageStreaming(uint32_t pageIndex,
   size_t totalRead = 0;
 
   while (totalRead < bitmapSize) {
-    const size_t toRead = std::min(chunkSize, bitmapSize - totalRead);
-    // FsFile::read returns int; treat anything non-positive as a fatal
-    // read error. Previously stored into size_t, which turned a -1 error
-    // into SIZE_MAX, fed that to callback() as the 'bytes available' arg,
-    // and then totalRead += SIZE_MAX overflowed to exit the loop without
-    // reporting failure.
-    const int rawRead = m_file.read(chunk.data(), toRead);
-    if (rawRead <= 0) {
+    size_t toRead = std::min(chunkSize, bitmapSize - totalRead);
+    size_t bytesRead = m_file.read(chunk.data(), toRead);
+
+    if (bytesRead == 0) {
+      closeFile();
       return XtcError::READ_ERROR;
     }
-    const size_t bytesRead = static_cast<size_t>(rawRead);
 
     callback(chunk.data(), bytesRead, totalRead);
     totalRead += bytesRead;
   }
 
+  closeFile();
   return XtcError::OK;
 }
 
 bool XtcParser::isValidXtcFile(const char* filepath) {
   FsFile file;
-  if (!SdMan.openFileForRead("XTC", filepath, file)) {
+  if (!Storage.openFileForRead("XTC", filepath, file)) {
     return false;
   }
 
   uint32_t magic = 0;
-  const int bytesRead = file.read(reinterpret_cast<uint8_t*>(&magic), sizeof(magic));
+  size_t bytesRead = file.read(reinterpret_cast<uint8_t*>(&magic), sizeof(magic));
   file.close();
 
-  if (bytesRead < 0 || static_cast<size_t>(bytesRead) != sizeof(magic)) {
+  if (bytesRead != sizeof(magic)) {
     return false;
   }
 

@@ -2,8 +2,7 @@
 
 #include <Utf8.h>
 
-inline int min(const int a, const int b) { return a < b ? a : b; }
-inline int max(const int a, const int b) { return a < b ? b : a; }
+#include <algorithm>
 
 void EpdFont::getTextBounds(const char* string, const int startX, const int startY, int* minX, int* minY, int* maxX,
                             int* maxY) const {
@@ -16,47 +15,59 @@ void EpdFont::getTextBounds(const char* string, const int startX, const int star
     return;
   }
 
-  int cursorX = startX;
-  const int cursorY = startY;
+  int lastBaseX = startX;
+  int lastBaseLeft = 0;
+  int lastBaseWidth = 0;
+  int lastBaseTop = 0;
+  int32_t prevAdvanceFP = 0;  // 12.4 fixed-point: prev glyph's advance + next kern for snap
   uint32_t cp;
+  uint32_t prevCp = 0;
   while ((cp = utf8NextCodepoint(reinterpret_cast<const uint8_t**>(&string)))) {
-    const EpdGlyph* glyph = getGlyph(cp);
+    const bool isCombining = utf8IsCombiningMark(cp);
 
-    if (!glyph) {
-      // Unicode whitespace (NBSP, narrow NBSP, EN/EM/thin spaces,
-      // ideographic space): measure as a space to stay in sync with
-      // GfxRenderer::renderChar's whitespace fallback (b7d227d).
-      // Without this, getTextDimensions reported '?' widths for
-      // codepoints that render as spaces — so lines measured against
-      // a maxWidth bound could ship text past the right margin.
-      const bool isUnicodeWhitespace = (cp == 0x00A0) ||
-                                       (cp >= 0x2000 && cp <= 0x200A) ||
-                                       (cp == 0x202F) ||
-                                       (cp == 0x205F) ||
-                                       (cp == 0x3000);
-      if (isUnicodeWhitespace) {
-        const EpdGlyph* space = getGlyph(' ');
-        if (space) {
-          const int advance = space->advanceX * ((cp == 0x2003 || cp == 0x3000) ? 2 : 1);
-          cursorX += advance;
-          *maxX = max(*maxX, cursorX);
-          continue;
-        }
-      }
-      // TODO: Replace with fallback glyph property?
-      glyph = getGlyph('?');
+    if (!isCombining) {
+      cp = applyLigatures(cp, string);
     }
 
+    const EpdGlyph* glyph = getGlyph(cp);
     if (!glyph) {
-      // TODO: Better handle this?
+      // Keep cursor movement stable when a base glyph is missing, but don't attach subsequent
+      // combining marks to stale base metrics.
+      if (!isCombining) {
+        lastBaseX += fp4::toPixel(prevAdvanceFP);  // flush pending advance before resetting
+        prevCp = 0;
+        prevAdvanceFP = 0;
+        lastBaseLeft = 0;
+        lastBaseWidth = 0;
+        lastBaseTop = 0;
+      }
       continue;
     }
 
-    *minX = min(*minX, cursorX + glyph->left);
-    *maxX = max(*maxX, cursorX + glyph->left + glyph->width);
-    *minY = min(*minY, cursorY + glyph->top - glyph->height);
-    *maxY = max(*maxY, cursorY + glyph->top);
-    cursorX += glyph->advanceX;
+    const int raiseBy = isCombining ? combiningMark::raiseAboveBase(glyph->top, glyph->height, lastBaseTop) : 0;
+
+    if (!isCombining && prevCp != 0) {
+      const auto kernFP = getKerning(prevCp, cp);  // 4.4 fixed-point kern
+      lastBaseX += fp4::toPixel(prevAdvanceFP + kernFP);
+    }
+
+    const int glyphBaseX =
+        isCombining ? combiningMark::centerOver(lastBaseX, lastBaseLeft, lastBaseWidth, glyph->left, glyph->width)
+                    : lastBaseX;
+    const int glyphBaseY = startY - raiseBy;
+
+    *minX = std::min(*minX, glyphBaseX + glyph->left);
+    *maxX = std::max(*maxX, glyphBaseX + glyph->left + glyph->width);
+    *minY = std::min(*minY, glyphBaseY + glyph->top - glyph->height);
+    *maxY = std::max(*maxY, glyphBaseY + glyph->top);
+
+    if (!isCombining) {
+      lastBaseLeft = glyph->left;
+      lastBaseWidth = glyph->width;
+      lastBaseTop = glyph->top;
+      prevAdvanceFP = glyph->advanceX;  // 12.4 fixed-point
+      prevCp = cp;
+    }
   }
 }
 
@@ -69,46 +80,107 @@ void EpdFont::getTextDimensions(const char* string, int* w, int* h) const {
   *h = maxY - minY;
 }
 
-bool EpdFont::hasPrintableChars(const char* string) const {
-  int w = 0, h = 0;
+static uint8_t lookupKernClass(const EpdKernClassEntry* entries, const uint16_t count, const uint32_t cp) {
+  if (!entries || count == 0 || cp > 0xFFFF) {
+    return 0;
+  }
 
-  getTextDimensions(string, &w, &h);
+  const auto target = static_cast<uint16_t>(cp);
+  const auto* end = entries + count;
 
-  return w > 0 || h > 0;
+  // lower_bound: exact-key lookup. Finds the first entry with codepoint >= target,
+  // then the equality check confirms an exact match exists.
+  const auto it = std::lower_bound(
+      entries, end, target, [](const EpdKernClassEntry& entry, uint16_t value) { return entry.codepoint < value; });
+
+  if (it != end && it->codepoint == target) {
+    return it->classId;
+  }
+
+  return 0;
+}
+
+int8_t EpdFont::getKerning(const uint32_t leftCp, const uint32_t rightCp) const {
+  if (!data->kernMatrix) {
+    return 0;
+  }
+  const uint8_t lc = lookupKernClass(data->kernLeftClasses, data->kernLeftEntryCount, leftCp);
+  if (lc == 0) return 0;
+  const uint8_t rc = lookupKernClass(data->kernRightClasses, data->kernRightEntryCount, rightCp);
+  if (rc == 0) return 0;
+  return data->kernMatrix[(lc - 1) * data->kernRightClassCount + (rc - 1)];
+}
+
+uint32_t EpdFont::getLigature(const uint32_t leftCp, const uint32_t rightCp) const {
+  const auto* pairs = data->ligaturePairs;
+  const auto count = data->ligaturePairCount;
+  if (!pairs || count == 0 || leftCp > 0xFFFF || rightCp > 0xFFFF) {
+    return 0;
+  }
+
+  const uint32_t key = (leftCp << 16) | rightCp;
+  const auto* end = pairs + count;
+
+  // lower_bound: exact-key lookup. Finds the first entry with pair >= key,
+  // then the equality check confirms an exact match exists.
+  const auto it =
+      std::lower_bound(pairs, end, key, [](const EpdLigaturePair& pair, uint32_t value) { return pair.pair < value; });
+
+  if (it != end && it->pair == key) {
+    return it->ligatureCp;
+  }
+
+  return 0;
+}
+
+uint32_t EpdFont::applyLigatures(uint32_t cp, const char*& text) const {
+  if (!data->ligaturePairs || data->ligaturePairCount == 0) {
+    return cp;
+  }
+  while (true) {
+    const auto saved = reinterpret_cast<const uint8_t*>(text);
+    const uint32_t nextCp = utf8NextCodepoint(reinterpret_cast<const uint8_t**>(&text));
+    if (nextCp == 0) break;
+    const uint32_t lig = getLigature(cp, nextCp);
+    if (lig == 0) {
+      text = reinterpret_cast<const char*>(saved);
+      break;
+    }
+    cp = lig;
+  }
+  return cp;
 }
 
 const EpdGlyph* EpdFont::getGlyph(const uint32_t cp) const {
-  // Check cache first for O(1) lookup of hot glyphs
-  const EpdGlyph* cached = glyphCache.lookup(cp);
-  if (cached) {
-    return cached;
-  }
-
-  const EpdUnicodeInterval* intervals = data->intervals;
   const int count = data->intervalCount;
+  if (count == 0 && !data->glyphMissHandler) return nullptr;
 
-  if (count == 0) return nullptr;
+  if (count > 0) {
+    const EpdUnicodeInterval* intervals = data->intervals;
+    const auto* end = intervals + count;
 
-  // Binary search for O(log n) lookup instead of O(n)
-  // Critical for Korean fonts with many unicode intervals
-  int left = 0;
-  int right = count - 1;
+    // upper_bound: range lookup. Finds the first interval with first > cp, so the
+    // interval just before it is the last one with first <= cp. That's the only
+    // candidate that could contain cp. Then we verify cp <= candidate.last.
+    const auto it = std::upper_bound(
+        intervals, end, cp, [](uint32_t value, const EpdUnicodeInterval& interval) { return value < interval.first; });
 
-  while (left <= right) {
-    const int mid = left + (right - left) / 2;
-    const EpdUnicodeInterval* interval = &intervals[mid];
-
-    if (cp < interval->first) {
-      right = mid - 1;
-    } else if (cp > interval->last) {
-      left = mid + 1;
-    } else {
-      // Found: cp >= interval->first && cp <= interval->last
-      const EpdGlyph* glyph = &data->glyph[interval->offset + (cp - interval->first)];
-      glyphCache.store(cp, glyph);
-      return glyph;
+    if (it != intervals) {
+      const auto& interval = *(it - 1);
+      if (cp <= interval.last) {
+        return &data->glyph[interval.offset + (cp - interval.first)];
+      }
     }
   }
 
+  // Codepoint not in interval table — try on-demand loading (SD card fonts).
+  if (data->glyphMissHandler) {
+    const EpdGlyph* loaded = data->glyphMissHandler(data->glyphMissCtx, cp);
+    if (loaded) return loaded;
+  }
+
+  if (cp != REPLACEMENT_GLYPH) {
+    return getGlyph(REPLACEMENT_GLYPH);
+  }
   return nullptr;
 }
