@@ -22,6 +22,7 @@ enum class ShortcutId {
   Bookmarks,
   Favorites,
   Flashcards,
+  Write,
   FileTransfer,
   ScreenClean,
   Sleep,
@@ -38,8 +39,8 @@ struct ShortcutDefinition {
   uint8_t CrossPointSettings::* visiblePtr;
 };
 
-inline const std::array<ShortcutDefinition, 16>& getShortcutDefinitions() {
-  static const std::array<ShortcutDefinition, 16> definitions = {
+inline const std::array<ShortcutDefinition, 17>& getShortcutDefinitions() {
+  static const std::array<ShortcutDefinition, 17> definitions = {
       ShortcutDefinition{ShortcutId::BrowseFiles, StrId::STR_BROWSE_FILES, StrId::STR_NONE_OPT, UIIcon::Folder,
                          &CrossPointSettings::browseFilesShortcut, &CrossPointSettings::browseFilesShortcutOrder,
                          &CrossPointSettings::browseFilesShortcutVisible},
@@ -78,6 +79,11 @@ inline const std::array<ShortcutDefinition, 16>& getShortcutDefinitions() {
       ShortcutDefinition{ShortcutId::Flashcards, StrId::STR_FLASHCARDS, StrId::STR_FLASHCARDS_APP_DESC, UIIcon::Text,
                          &CrossPointSettings::flashcardsShortcut, &CrossPointSettings::flashcardsShortcutOrder,
                          &CrossPointSettings::flashcardsShortcutVisible},
+      // UIIcon::Text is a placeholder — a real pen/keyboard icon is planned
+      // (see NOTICE.md / project notes), not drawn yet.
+      ShortcutDefinition{ShortcutId::Write, StrId::STR_WRITE, StrId::STR_WRITE_APP_DESC, UIIcon::Text,
+                         &CrossPointSettings::writeShortcut, &CrossPointSettings::writeShortcutOrder,
+                         &CrossPointSettings::writeShortcutVisible},
       ShortcutDefinition{ShortcutId::FileTransfer, StrId::STR_FILE_TRANSFER, StrId::STR_FILE_TRANSFER_APP_DESC,
                          UIIcon::Transfer, &CrossPointSettings::fileTransferShortcut,
                          &CrossPointSettings::fileTransferShortcutOrder, &CrossPointSettings::fileTransferShortcutVisible},

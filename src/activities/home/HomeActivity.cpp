@@ -30,6 +30,7 @@
 #include "activities/apps/BookmarksAppActivity.h"
 #include "activities/apps/FavoritesAppActivity.h"
 #include "activities/apps/FlashcardsAppActivity.h"
+#include "activities/apps/WriterActivity.h"
 #include "activities/apps/IfFoundActivity.h"
 #include "activities/apps/ReadingHeatmapActivity.h"
 #include "activities/apps/ReadingProfileActivity.h"
@@ -1024,6 +1025,10 @@ void HomeActivity::loop() {
           break;
         case ShortcutId::Flashcards:
           startActivityForResult(std::make_unique<FlashcardsAppActivity>(renderer, mappedInput),
+                                 [this](const ActivityResult&) { requestFreshHomeRender(true); });
+          break;
+        case ShortcutId::Write:
+          startActivityForResult(std::make_unique<WriterActivity>(renderer, mappedInput),
                                  [this](const ActivityResult&) { requestFreshHomeRender(true); });
           break;
         case ShortcutId::FileTransfer:
