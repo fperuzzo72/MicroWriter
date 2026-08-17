@@ -1,0 +1,220 @@
+name: Build CrossPoint Dual-Boot
+
+on:
+  workflow_dispatch:
+    inputs:
+      crosspoint_tag:
+        description: 'Tag do CrossPoint a compilar (ex: 1.4.1)'
+        required: true
+        default: '1.4.1'
+
+permissions:
+  contents: write
+
+jobs:
+  build-crosspoint:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout MicroWriter (este repo)
+        uses: actions/checkout@v4
+
+      - name: Checkout CrossPoint na tag especificada
+        uses: actions/checkout@v4
+        with:
+          repository: crosspoint-reader/crosspoint-reader
+          ref: ${{ github.event.inputs.crosspoint_tag }}
+          submodules: recursive
+          path: crosspoint
+
+      # -----------------------------------------------------------------------
+      # Patches — cada script mexe em um arquivo do CrossPoint. Ficam em
+      # patches/crosspoint/ deste repo (não do CrossPoint), mesmo padrão de
+      # patches/crossink/.
+      # -----------------------------------------------------------------------
+      - name: "Patch 1/5 — Criar OtaApps.h"
+        run: python3 patches/crosspoint/01_create_otaapps_h.py
+
+      - name: "Patch 2/5 — HomeActivity.h"
+        run: python3 patches/crosspoint/02_patch_home_activity_h.py
+
+      - name: "Patch 3/5 — HomeActivity.cpp"
+        run: python3 patches/crosspoint/03_patch_home_activity_cpp.py
+
+      - name: "Patch 4/5 — main.cpp"
+        run: python3 patches/crosspoint/04_patch_main_cpp.py
+
+      - name: "Patch 5/5 — Proteção do autoupdate (FirmwareFlasher)"
+        run: python3 patches/crosspoint/05_patch_self_update_guard.py
+
+      # -----------------------------------------------------------------------
+      # Verificação
+      # -----------------------------------------------------------------------
+      - name: Verificar patch
+        run: |
+          set -e
+          grep -q "otaAppCount" crosspoint/src/activities/home/HomeActivity.cpp \
+            && echo "✅ HomeActivity.cpp: otaAppCount presente"
+          grep -q "detectOtaApps" crosspoint/src/activities/home/HomeActivity.cpp \
+            && echo "✅ HomeActivity.cpp: detectOtaApps presente"
+          grep -q "switchToOtaApp" crosspoint/src/activities/home/HomeActivity.cpp \
+            && echo "✅ HomeActivity.cpp: switchToOtaApp presente"
+          grep -q "OtaApps.h" crosspoint/src/activities/home/HomeActivity.h \
+            && echo "✅ HomeActivity.h: include OK"
+          grep -q "registerOtaAppName" crosspoint/src/main.cpp \
+            && echo "✅ main.cpp: registerOtaAppName presente"
+          test -f crosspoint/src/OtaApps.h \
+            && echo "✅ OtaApps.h: arquivo presente"
+          grep -q "destHoldsForeignApp" crosspoint/src/network/FirmwareFlasher.cpp \
+            && echo "✅ FirmwareFlasher.cpp: destHoldsForeignApp presente"
+          grep -q "SIBLING_APP_PROTECTED" crosspoint/src/network/FirmwareFlasher.h \
+            && echo "✅ FirmwareFlasher.h: SIBLING_APP_PROTECTED presente"
+
+      # -----------------------------------------------------------------------
+      # Build — CrossPoint
+      # -----------------------------------------------------------------------
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependências de build
+        run: |
+          pip install uv
+          uv pip install --system -U \
+            https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
+          pip install -r crosspoint/scripts/requirements.txt
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: pio-crosspoint-${{ github.event.inputs.crosspoint_tag }}-${{ hashFiles('crosspoint/platformio.ini') }}
+          restore-keys: pio-crosspoint-
+
+      - name: Compilar CrossPoint com dual-boot
+        working-directory: crosspoint
+        run: pio run -e gh_release
+
+      # -----------------------------------------------------------------------
+      # Build — editor (MicroWriter, com o fix do OtaBootSwitch)
+      # -----------------------------------------------------------------------
+      - uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: pio-editor-${{ hashFiles('editor/platformio.ini', 'editor/sdkconfig.defaults') }}
+          restore-keys: pio-editor-
+
+      - name: Compilar editor
+        working-directory: editor
+        env:
+          IDF_COMPONENT_MANAGER: "0"
+        run: pio run -e xteink_x4
+
+      # -----------------------------------------------------------------------
+      # Montar binários
+      # -----------------------------------------------------------------------
+      - name: Montar binários
+        run: |
+          pip install esptool
+          BOOT_APP0=$(find ~/.platformio -name "boot_app0.bin" | head -1)
+          TAG=${{ github.event.inputs.crosspoint_tag }}
+
+          CP_FW=crosspoint/.pio/build/gh_release/firmware.bin
+          CP_BOOT=crosspoint/.pio/build/gh_release/bootloader.bin
+          CP_PART=crosspoint/.pio/build/gh_release/partitions.bin
+          ED_FW=editor/.pio/build/xteink_x4/firmware.bin
+          ED_BOOT=editor/.pio/build/xteink_x4/bootloader.bin
+          ED_PART=editor/.pio/build/xteink_x4/partitions.bin
+
+          # 1) CrossPoint standalone — instalação do zero, sem o editor
+          esptool.py --chip esp32c3 merge_bin \
+            --flash_mode dio --flash_size 16MB \
+            -o crosspoint-${TAG}-standalone-full.bin \
+            0x0     "$CP_BOOT" \
+            0x8000  "$CP_PART" \
+            0xe000  "$BOOT_APP0" \
+            0x10000 "$CP_FW"
+
+          # 2) Editor standalone — instalação do zero, sem CrossPoint
+          esptool.py --chip esp32c3 merge_bin \
+            --flash_mode dio --flash_size 16MB \
+            -o microwriter-editor-standalone-full.bin \
+            0x0     "$ED_BOOT" \
+            0x8000  "$ED_PART" \
+            0xe000  "$BOOT_APP0" \
+            0x10000 "$ED_FW"
+
+          # 3) Dual-boot completo em um único arquivo — CrossPoint no app0
+          #    (boot padrão, 0x10000) + editor no app1 (0x650000)
+          esptool.py --chip esp32c3 merge_bin \
+            --flash_mode dio --flash_size 16MB \
+            -o dualboot-crosspoint-${TAG}-microwriter-full.bin \
+            0x0     "$CP_BOOT" \
+            0x8000  "$CP_PART" \
+            0xe000  "$BOOT_APP0" \
+            0x10000 "$CP_FW" \
+            0x650000 "$ED_FW"
+
+          # 4) Slot-only — para quem já tem dual-boot e quer atualizar só o CrossPoint
+          cp "$CP_FW" crosspoint-${TAG}-dualboot-slot-only.bin
+
+          # 5) Slot-only — para quem já tem dual-boot e quer atualizar só o editor
+          cp "$ED_FW" microwriter-editor-dualboot-slot-only.bin
+
+      # -----------------------------------------------------------------------
+      # Publicar release
+      # -----------------------------------------------------------------------
+      - name: Publicar release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: crosspoint-${{ github.event.inputs.crosspoint_tag }}-dualboot
+          name: "CrossPoint ${{ github.event.inputs.crosspoint_tag }} + MicroWriter Dual-Boot"
+          files: |
+            crosspoint-${{ github.event.inputs.crosspoint_tag }}-standalone-full.bin
+            microwriter-editor-standalone-full.bin
+            dualboot-crosspoint-${{ github.event.inputs.crosspoint_tag }}-microwriter-full.bin
+            crosspoint-${{ github.event.inputs.crosspoint_tag }}-dualboot-slot-only.bin
+            microwriter-editor-dualboot-slot-only.bin
+          body: |
+            ## CrossPoint ${{ github.event.inputs.crosspoint_tag }} + MicroWriter — Dual-Boot
+
+            Compilado a partir do CrossPoint oficial
+            `${{ github.event.inputs.crosspoint_tag }}` com os patches de dual-boot
+            deste repo (`patches/crosspoint/`) aplicados automaticamente em CI, mais
+            o editor deste repo (`editor/`).
+
+            No menu principal do CrossPoint aparece uma entrada **MicroWriter**; no
+            menu do editor aparece uma entrada **CrossPoint** — cada uma reinicia no
+            outro app. O autoupdate de firmware do CrossPoint está protegido contra
+            sobrescrever o slot do editor (veja
+            `patches/crosspoint/05_patch_self_update_guard.py`).
+
+            ### Qual arquivo usar?
+
+            | Situação | Arquivo | Endereço |
+            |---|---|---|
+            | Instalação do zero, dual-boot completo (recomendado) | `dualboot-crosspoint-*-microwriter-full.bin` | `0x0` |
+            | Instalação do zero, só CrossPoint | `crosspoint-*-standalone-full.bin` | `0x0` |
+            | Instalação do zero, só o editor | `microwriter-editor-standalone-full.bin` | `0x0` |
+            | Já tem dual-boot, atualizar só o CrossPoint | `crosspoint-*-dualboot-slot-only.bin` | `0x10000` |
+            | Já tem dual-boot, atualizar só o editor | `microwriter-editor-dualboot-slot-only.bin` | `0x650000` |
+
+            ### Como gravar (browser)
+
+            Acesse [esp.huhn.me](https://esp.huhn.me) no Chrome/Edge, conecte o X4,
+            selecione o arquivo e informe o endereço correto.
+
+            ### Como gravar (terminal)
+
+            ```bash
+            # Dual-boot completo, do zero
+            esptool.py --chip esp32c3 --port COM5 --baud 460800 \
+              write_flash 0x0 dualboot-crosspoint-*-microwriter-full.bin
+
+            # Atualizar só o CrossPoint (dual-boot já instalado)
+            esptool.py --chip esp32c3 --port COM5 --baud 460800 \
+              write_flash 0x10000 crosspoint-*-dualboot-slot-only.bin
+
+            # Atualizar só o editor (dual-boot já instalado)
+            esptool.py --chip esp32c3 --port COM5 --baud 460800 \
+              write_flash 0x650000 microwriter-editor-dualboot-slot-only.bin
+            ```

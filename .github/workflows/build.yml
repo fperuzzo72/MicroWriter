@@ -1,0 +1,99 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: editor
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            editor/.pio/build
+          key: pio-${{ hashFiles('editor/platformio.ini', 'editor/sdkconfig.defaults') }}
+          restore-keys: pio-
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Build firmware
+        run: pio run
+
+      - name: Prepare release files
+        run: |
+          pip install esptool
+          BOOT_APP0=$(find ~/.platformio -name "boot_app0.bin" | head -1)
+
+          # --- Arquivo 1: slot-only ---
+          # Grava SOMENTE o MicroSlate no slot app1 (0x650000).
+          # Use este para atualizar sem apagar o CrossPoint.
+          cp .pio/build/xteink_x4/firmware.bin \
+             microslate-usi-slot-only-${{ github.ref_name }}.bin
+
+          # --- Arquivo 2: merged completo (instalação do zero) ---
+          # Grava bootloader + partições + MicroSlate no slot app0.
+          # Use APENAS em dispositivos sem nada instalado.
+          esptool.py --chip esp32c3 merge_bin \
+            --flash_mode dio --flash_size 16MB \
+            -o microslate-usi-full-${{ github.ref_name }}.bin \
+            0x0     .pio/build/xteink_x4/bootloader.bin \
+            0x8000  .pio/build/xteink_x4/partitions.bin \
+            0xe000  "$BOOT_APP0" \
+            0x10000 .pio/build/xteink_x4/firmware.bin
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            editor/microslate-usi-slot-only-${{ github.ref_name }}.bin
+            editor/microslate-usi-full-${{ github.ref_name }}.bin
+          generate_release_notes: true
+          body: |
+            ## MicroSlate — US-International keyboard layout
+
+            ### Qual arquivo usar?
+
+            | Situação | Arquivo |
+            |---|---|
+            | Já tem CrossPoint + MicroSlate instalados (dual-boot) | `microslate-usi-slot-only-*.bin` → gravar em **0x650000** |
+            | Instalação do zero (sem nada no dispositivo) | `microslate-usi-full-*.bin` → gravar em **0x0** |
+
+            ### Como gravar o slot-only (sem apagar o CrossPoint)
+
+            **Pelo browser** (Chrome/Edge): acesse [esp.huhn.me](https://esp.huhn.me),
+            conecte o X4, adicione o arquivo `slot-only` com endereço `0x650000` e clique em Program.
+
+            **Pelo terminal:**
+            ```
+            esptool.py --chip esp32c3 --port COM5 --baud 460800 write_flash 0x650000 microslate-usi-slot-only-*.bin
+            ```
+
+            ### Dead keys implementadas
+
+            | Tecla | Resultado |
+            |---|---|
+            | `'` + vogal | á é í ó ú (e maiúsculas) |
+            | `'` + c | ç / Ç |
+            | `` ` `` + vogal | à è ì ò ù |
+            | `~` + a / o | ã / õ |
+            | `^` + vogal | â ê î ô û |
+            | `"` + vogal | ä ë ï ö ü |
+            | dead key + espaço | caractere literal |

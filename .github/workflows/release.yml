@@ -1,0 +1,101 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: editor
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            editor/.pio/build
+          key: pio-${{ hashFiles('editor/platformio.ini', 'editor/sdkconfig.defaults') }}
+          restore-keys: pio-
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Build firmware
+        run: pio run
+
+      - name: Merge binaries
+        run: |
+          pip install esptool
+          BOOT_APP0=$(find ~/.platformio -name "boot_app0.bin" | head -1)
+
+          esptool.py --chip esp32c3 merge_bin \
+            --flash_mode dio --flash_size 16MB \
+            -o microslate-${{ github.ref_name }}.bin \
+            0x0     .pio/build/xteink_x4/bootloader.bin \
+            0x8000  .pio/build/xteink_x4/partitions.bin \
+            0xe000  "$BOOT_APP0" \
+            0x10000 .pio/build/xteink_x4/firmware.bin
+
+          if curl -f -o crosspoint-app.bin https://typeslate.com/tools/crosspoint/firmware/app.bin; then
+            esptool.py --chip esp32c3 merge_bin \
+              --flash_mode dio --flash_size 16MB \
+              -o dualboot-${{ github.ref_name }}.bin \
+              0x0      .pio/build/xteink_x4/bootloader.bin \
+              0x8000   .pio/build/xteink_x4/partitions.bin \
+              0xe000   "$BOOT_APP0" \
+              0x10000  crosspoint-app.bin \
+              0x650000 .pio/build/xteink_x4/firmware.bin
+            echo "DUALBOOT_BUILT=true" >> $GITHUB_ENV
+          else
+            echo "CrossPoint app.bin not on website yet, skipping dual-boot build"
+            echo "DUALBOOT_BUILT=false" >> $GITHUB_ENV
+          fi
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            editor/microslate-${{ github.ref_name }}.bin
+            editor/dualboot-${{ github.ref_name }}.bin
+          fail_on_unmatched_files: false
+          generate_release_notes: true
+
+      # NOTE: this step pushes to an external repo (josh-websites/typeslate-website)
+      # using a WEBSITE_PAT secret — that secret belongs to whoever runs
+      # typeslate.com and almost certainly isn't configured on this repo.
+      # Left as-is (path-fixed only) rather than silently dropped; if it's
+      # not meant to run here, either remove this step or add the secret.
+      - name: Update firmware on typeslate website
+        env:
+          WEBSITE_PAT: ${{ secrets.WEBSITE_PAT }}
+        run: |
+          git clone https://x-access-token:${WEBSITE_PAT}@github.com/josh-websites/typeslate-website.git website
+          cp microslate-${{ github.ref_name }}.bin website/tools/microslate/firmware/latest.bin
+          echo '{"version":"${{ github.ref_name }}"}' > website/tools/microslate/firmware/version.json
+
+          if [ "$DUALBOOT_BUILT" = "true" ]; then
+            cp dualboot-${{ github.ref_name }}.bin website/tools/microslate/firmware/dualboot-latest.bin
+            echo '{"version":"${{ github.ref_name }}"}' > website/tools/microslate/firmware/dualboot-version.json
+            git -C website add tools/microslate/firmware/dualboot-latest.bin tools/microslate/firmware/dualboot-version.json
+          fi
+
+          cd website
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add tools/microslate/firmware/latest.bin tools/microslate/firmware/version.json
+          git commit -m "Update MicroSlate firmware to ${{ github.ref_name }}"
+          git push

@@ -1,110 +1,116 @@
-# MicroWriter X4
+# MicroWriter
 
-Two-firmware **dual-boot** bundle for the **Xteink X4** e-paper device:
-an EPUB reader and a Bluetooth-keyboard-driven writer, sharing the same
-16MB flash and switching between each other from a menu entry — no
+**MicroWriter** is a BLE-keyboard writing firmware for e-paper devices,
+plus a small patch system that pairs it, at build time, into a
+**dual-boot** bundle with an e-reader of your choice — sharing the
+device's flash and switching between the two from a menu entry, no
 reflashing required.
 
-**Stable release: MicroWriter 0.2.** Both halves now live in this repo —
-reader at the root, editor at `editor/` (see `editor/README.md` for its
-own changelog: PgUp/PgDn, the browser file manager, mDNS/OTA rename to
-"MicroWriter"). Confirmed working together on physical Xteink X4 hardware
-— both firmwares register their correct dual-boot menu names
-("MicroWriter", not "MicroWriter X4" — see `NOTICE.md` for why), and the
-self-update guard is in place.
+This repo holds:
 
-This project first tried building a single integrated firmware (reader +
-writer + BLE keyboard host in one binary, one input model). Hands-on
-testing found that NimBLE's own runtime heap footprint (~90-100KB,
-invisible to static size analysis) starves the EPUB reader's heap whenever
-it's initialized, causing intermittent crashes, broken cover thumbnails,
-and full page-render failures. Deferring BLE init to only run while the
-writer was open worked, but at that point the writer no longer needed
-anything from the reader's own codebase — so this settled on the
-dual-boot split instead: two independent, purpose-built firmwares, each
-free to use its full heap, switching over a warm reboot (a few seconds).
+- **`editor/`** — the writer itself, built on
+  [MicroSlate](https://github.com/Josh-writes/microslate-firmware) (via a
+  personal [US-International fork](https://github.com/fperuzzo72/microslate-firmware-US-International)).
+  **For the full feature list, keybindings, and usage guide, see
+  [MicroSlate's own original README](https://github.com/Josh-writes/microslate-firmware#readme)**
+  — everything there (Bluetooth keyboard support, note management,
+  writing modes, WiFi sync, auto-save, etc.) still applies here unchanged;
+  `editor/README.md` only documents what's *different* from stock
+  MicroSlate. Its own independent firmware, own `platformio.ini`, builds
+  and flashes on its own.
+- **`patches/`** — one subdirectory per supported reader
+  ([CrossPoint](https://github.com/crosspoint-reader/crosspoint-reader),
+  [CrossInk](https://github.com/uxjulia/CrossInk),
+  [CPR-vCodex](https://github.com/franssjz/cpr-vcodex)). Each is a set of
+  scripts that edit a checkout of that reader — provided by you, not
+  carried in this repo — to add the dual-boot "call to the editor" and
+  protect the reader's own firmware self-update from overwriting the
+  editor's OTA slot.
 
-## The two firmwares
+There's no reader source in this tree. You pick a reader, point the
+patch scripts at your own checkout of it, build both, and merge the two
+resulting binaries into one flashable image. See `patches/<reader>/README.md`
+for the exact steps and the upstream tag each was last verified against.
 
-| | Reader (this repo) | Editor |
-|---|---|---|
-| Base | [CPR-vCodex](https://github.com/franssjz/cpr-vcodex) `1.5.0.9`, Lyra theme | [MicroSlate US-International](https://github.com/fperuzzo72/microslate-firmware-US-International) |
-| Does | EPUB reading, reading stats, KOReader sync, OPDS, dictionary, flashcards, file transfer | BLE keyboard host, dead-key (US-International) text notes |
-| Switches to the other via | Home/Apps shortcut **"MicroSlate"** | Home menu entry (auto-named from this firmware's own registration — see below) |
+**Stable release: MicroWriter 0.3.** First release under this
+structure — see `editor/README.md` for the editor's own changelog
+(PgUp/PgDn, the browser file manager, mDNS/OTA rename to "MicroWriter").
+The `patches/` scripts themselves are new this version; see `NOTICE.md`
+for exactly what changed and why.
 
-Both firmwares are built from their own source trees (MicroSlate's isn't
-copied into this repo) and merged into one flashable image at the binary
-level, the same way CrossInk + MicroSlate's own existing dual-boot release
-does it.
+## Why dual-boot instead of one integrated firmware
+
+This project first tried a single integrated firmware (reader + writer +
+BLE keyboard host in one binary, one input model). Hands-on testing found
+that NimBLE's own runtime heap footprint (~90-100KB, invisible to static
+size analysis) starves the reader's heap whenever it's initialized,
+causing intermittent crashes, broken cover thumbnails, and full
+page-render failures. Deferring BLE init to only run while the writer was
+open worked, but at that point the writer no longer needed anything from
+the reader's own codebase — so this settled on the dual-boot split
+instead: two independent, purpose-built firmwares, each free to use its
+full heap, switching over a warm reboot (a few seconds).
 
 ## How the switch works
 
-Both projects already share the exact same `partitions.csv` layout
-(`ota_0` at `0x10000`, `ota_1` at `0x650000`, both 6.25MB — same
-CrossPoint-lineage ancestry) and CPR-vCodex already ships the low-level
-otadata-write primitive needed to switch boot partitions on this hardware
-(`src/network/OtaBootSwitch.h/.cpp` — `esp_ota_set_boot_partition()`
-itself fails here with a bogus efuse-blk-rev verification error, so both
-sides write the otadata partition directly instead, same trick the web
-flasher uses).
+All three supported readers share the same `ota_0`/`ota_1` partition
+layout the editor uses (same CrossPoint-lineage ancestry), and each
+already ships (or, for CPR-vCodex, easily reuses) the low-level
+otadata-write primitive needed to switch boot partitions on X4-class
+hardware — `esp_ota_set_boot_partition()` itself fails there with a bogus
+efuse-blk-rev verification error, so both sides write the otadata
+partition directly instead, same trick the web flasher uses.
 
-On top of that, `src/util/OtaApps.h` (ported from MicroSlate's own
-dual-boot code, itself adapted from CrossInk's) does three things:
+On top of that, every `patches/<reader>/` set injects an `OtaApps.h`
+(ported from the editor's own dual-boot code, itself adapted from
+CrossInk's) that does three things:
 
 - `registerOtaAppName(...)` — each firmware writes its own display name to
   shared NVS (`ota_names`), keyed by which OTA slot it's running from, at
   boot.
 - `detectOtaApps(...)` — scans the other OTA slot(s) and reads back
-  whatever name is registered there, so a menu can show "MicroSlate" or
-  "MicroWriter X4" instead of a generic "OTA Slot N".
+  whatever name is registered there, so a menu can show "MicroWriter" (or
+  whichever reader's name) instead of a generic "OTA Slot N".
 - `switchToOtaApp(...)` — writes the target slot into otadata and calls
   `esp_restart()`.
 
-**Known gap, not yet guarded against**: CPR-vCodex's own firmware
-self-update (Settings > Check for Updates / SD Firmware Update) always
-targets "the other OTA slot" with no awareness that the editor firmware
-lives there — using either update path will silently overwrite it.
+Each patch set also adds a self-update guard: before that reader's own
+firmware self-update writes anything, it compares the next-update
+partition's embedded app descriptor against the running app's own and
+refuses if they differ — protecting the editor's slot from being silently
+overwritten by an unrelated firmware update. See `NOTICE.md` for how this
+guard turned out to be the same literal patch across all three readers.
 
 ## Roadmap
 
-- [x] Reader + writer dual-boot switch (this)
-- [ ] Icons for the "MicroSlate"/reader-return shortcuts (currently a
-      placeholder text icon)
-- [x] Guard CPR-vCodex's self-update from overwriting the editor slot
-- [ ] More editor functionality on the MicroSlate side (this project's
-      name anticipates growing beyond stock MicroSlate here)
-- [ ] Third boot slot: a Game Boy emulator (SUMI's `src/plugins/gb/` is
-      the known-working reference) driven by physical buttons only, no
-      BLE — needs a 3-slot partition table, deferred, not a current
-      priority
+- [x] Editor + patch system split from the old fixed reader+editor bundle
+- [x] Dual-boot call + self-update guard for CrossPoint, CrossInk, and
+      CPR-vCodex
+- [ ] Icons for the reader-switch shortcuts (currently placeholder text)
+- [ ] Port to other e-paper hardware (Paper S3, LilyGO T5S3, X4 Pro) — the
+      editor/patch split exists specifically to make this a matter of new
+      build tags, not a new fork
+- [ ] Third boot slot: a Game Boy emulator, driven by physical buttons
+      only, no BLE — needs a 3-slot partition table, deferred
 
 ## Hardware
 
-Xteink X4 — ESP32-C3, 380KB RAM (no PSRAM), 800×480 1-bit e-ink, 5-way
-d-pad + power button, BLE 5.0, SD card.
+Verified so far on the **Xteink X4** — ESP32-C3, 380KB RAM (no PSRAM),
+800×480 1-bit e-ink, 5-way d-pad + power button, BLE 5.0, SD card.
 
 ## Building
 
-This repo holds both firmwares — the reader at the repo root, the editor
-at `editor/` — as two independent PlatformIO projects. Build each from its
-own directory:
-
 ```bash
-# Reader
-pio run -e default
-pio run -e default -t upload
-
 # Editor
 cd editor
 IDF_COMPONENT_MANAGER=0 pio run -e xteink_x4
 pio run -e xteink_x4 -t upload
 ```
 
-`editor/` was imported from
-[microslate-firmware-US-International](https://github.com/fperuzzo72/microslate-firmware-US-International)
-at its `microwriter-0.1` tag — that repo stays up as the frozen historical
-record, but active editor development now happens here, at `editor/`, not
-there. See `NOTICE.md` for the full attribution.
+For a reader, pick one of `patches/crosspoint/`, `patches/crossink/`, or
+`patches/cpr-vcodex/` and follow that directory's own `README.md` — it
+clones the upstream reader at a known-good tag, applies the patch
+scripts, and builds it.
 
 To flash a complete dual-boot image from scratch:
 
@@ -120,13 +126,9 @@ esptool.py --chip esp32c3 merge_bin \
 esptool.py --chip esp32c3 write_flash 0x0 dualboot-full.bin
 ```
 
-Reader's own `platformio.ini` pins a specific pioarduino
-`platform-espressif32` build. If building outside PlatformIO's own managed
-Python env, you may need `pip install littlefs-python fatfs-ng pyyaml` —
-those aren't declared dependencies of a vanilla `platformio` install, only
-of this specific pioarduino platform release.
-
 ## License
 
 MIT — see [LICENSE](LICENSE). Third-party attribution in
-[NOTICE.md](NOTICE.md).
+[NOTICE.md](NOTICE.md). Full project history and session-continuity notes
+(why things are structured this way, what's verified vs. not, ideas not
+yet acted on) in [docs/DEVELOPMENT_LOG.md](docs/DEVELOPMENT_LOG.md).

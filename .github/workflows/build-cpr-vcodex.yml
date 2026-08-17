@@ -1,0 +1,233 @@
+name: Build CPR-vCodex Dual-Boot
+
+on:
+  workflow_dispatch:
+    inputs:
+      cpr_vcodex_tag:
+        description: 'Tag do CPR-vCodex a compilar (ex: 1.5.0.9-cpr-vcodex)'
+        required: true
+        default: '1.5.0.9-cpr-vcodex'
+
+permissions:
+  contents: write
+
+jobs:
+  build-cpr-vcodex:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout MicroWriter (este repo)
+        uses: actions/checkout@v4
+
+      - name: Checkout CPR-vCodex na tag especificada
+        uses: actions/checkout@v4
+        with:
+          repository: franssjz/cpr-vcodex
+          ref: ${{ github.event.inputs.cpr_vcodex_tag }}
+          submodules: recursive
+          path: cpr-vcodex
+
+      # -----------------------------------------------------------------------
+      # Patches — cada script mexe em um arquivo do CPR-vCodex. Ficam em
+      # patches/cpr-vcodex/ deste repo. Oito passos (não 4-5, como
+      # crosspoint/crossink) porque o CPR-vCodex roteia atalhos por um
+      # ShortcutRegistry/ShortcutDefinition, não um switch/case cru em
+      # HomeActivity.cpp — ver patches/cpr-vcodex/README.md.
+      # -----------------------------------------------------------------------
+      - name: "Patch 1/8 — Criar OtaApps.h"
+        run: python3 patches/cpr-vcodex/01_create_otaapps_h.py
+
+      - name: "Patch 2/8 — ShortcutRegistry.h"
+        run: python3 patches/cpr-vcodex/02_patch_shortcut_registry.py
+
+      - name: "Patch 3/8 — CrossPointSettings.h"
+        run: python3 patches/cpr-vcodex/03_patch_crosspoint_settings.py
+
+      - name: "Patch 4/8 — AppsActivity.cpp"
+        run: python3 patches/cpr-vcodex/04_patch_apps_activity.py
+
+      - name: "Patch 5/8 — HomeActivity.cpp"
+        run: python3 patches/cpr-vcodex/05_patch_home_activity.py
+
+      - name: "Patch 6/8 — main.cpp"
+        run: python3 patches/cpr-vcodex/06_patch_main_cpp.py
+
+      - name: "Patch 7/8 — Strings i18n (english.yaml)"
+        run: python3 patches/cpr-vcodex/07_patch_i18n_strings.py
+
+      - name: "Patch 8/8 — Proteção do autoupdate (FirmwareFlasher)"
+        run: python3 patches/cpr-vcodex/08_patch_self_update_guard.py
+
+      # -----------------------------------------------------------------------
+      # Verificação
+      # -----------------------------------------------------------------------
+      - name: Verificar patch
+        run: |
+          set -e
+          grep -q "ShortcutId::MicroSlate" cpr-vcodex/src/util/ShortcutRegistry.h \
+            && echo "✅ ShortcutRegistry.h: ShortcutId::MicroSlate presente"
+          grep -q "microslateShortcut" cpr-vcodex/src/CrossPointSettings.h \
+            && echo "✅ CrossPointSettings.h: campos microslateShortcut* presentes"
+          grep -q "switchToFirstOtaApp" cpr-vcodex/src/activities/apps/AppsActivity.cpp \
+            && echo "✅ AppsActivity.cpp: switchToFirstOtaApp presente"
+          grep -q "switchToFirstOtaApp" cpr-vcodex/src/activities/home/HomeActivity.cpp \
+            && echo "✅ HomeActivity.cpp: switchToFirstOtaApp presente"
+          grep -q "registerOtaAppName" cpr-vcodex/src/main.cpp \
+            && echo "✅ main.cpp: registerOtaAppName presente"
+          grep -q "STR_MICROSLATE:" cpr-vcodex/lib/I18n/translations/english.yaml \
+            && echo "✅ english.yaml: STR_MICROSLATE presente"
+          test -f cpr-vcodex/src/util/OtaApps.h \
+            && echo "✅ OtaApps.h: arquivo presente"
+          grep -q "destHoldsForeignApp" cpr-vcodex/src/network/FirmwareFlasher.cpp \
+            && echo "✅ FirmwareFlasher.cpp: destHoldsForeignApp presente"
+          grep -q "SIBLING_APP_PROTECTED" cpr-vcodex/src/network/FirmwareFlasher.h \
+            && echo "✅ FirmwareFlasher.h: SIBLING_APP_PROTECTED presente"
+
+      # -----------------------------------------------------------------------
+      # Build — CPR-vCodex
+      # -----------------------------------------------------------------------
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependências de build
+        run: |
+          pip install uv
+          uv pip install --system -U \
+            https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
+          pip install -r cpr-vcodex/requirements.txt
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: pio-cpr-vcodex-${{ github.event.inputs.cpr_vcodex_tag }}-${{ hashFiles('cpr-vcodex/platformio.ini') }}
+          restore-keys: pio-cpr-vcodex-
+
+      - name: Compilar CPR-vCodex com dual-boot
+        working-directory: cpr-vcodex
+        run: pio run -e gh_release
+
+      # -----------------------------------------------------------------------
+      # Build — editor (MicroWriter, com o fix do OtaBootSwitch)
+      # -----------------------------------------------------------------------
+      - uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: pio-editor-${{ hashFiles('editor/platformio.ini', 'editor/sdkconfig.defaults') }}
+          restore-keys: pio-editor-
+
+      - name: Compilar editor
+        working-directory: editor
+        env:
+          IDF_COMPONENT_MANAGER: "0"
+        run: pio run -e xteink_x4
+
+      # -----------------------------------------------------------------------
+      # Montar binários
+      # -----------------------------------------------------------------------
+      - name: Montar binários
+        run: |
+          pip install esptool
+          BOOT_APP0=$(find ~/.platformio -name "boot_app0.bin" | head -1)
+          TAG=${{ github.event.inputs.cpr_vcodex_tag }}
+
+          CV_FW=cpr-vcodex/.pio/build/gh_release/firmware.bin
+          CV_BOOT=cpr-vcodex/.pio/build/gh_release/bootloader.bin
+          CV_PART=cpr-vcodex/.pio/build/gh_release/partitions.bin
+          ED_FW=editor/.pio/build/xteink_x4/firmware.bin
+          ED_BOOT=editor/.pio/build/xteink_x4/bootloader.bin
+          ED_PART=editor/.pio/build/xteink_x4/partitions.bin
+
+          # 1) CPR-vCodex standalone — instalação do zero, sem o editor
+          esptool.py --chip esp32c3 merge_bin \
+            --flash_mode dio --flash_size 16MB \
+            -o cpr-vcodex-${TAG}-standalone-full.bin \
+            0x0     "$CV_BOOT" \
+            0x8000  "$CV_PART" \
+            0xe000  "$BOOT_APP0" \
+            0x10000 "$CV_FW"
+
+          # 2) Editor standalone — instalação do zero, sem CPR-vCodex
+          esptool.py --chip esp32c3 merge_bin \
+            --flash_mode dio --flash_size 16MB \
+            -o microwriter-editor-standalone-full.bin \
+            0x0     "$ED_BOOT" \
+            0x8000  "$ED_PART" \
+            0xe000  "$BOOT_APP0" \
+            0x10000 "$ED_FW"
+
+          # 3) Dual-boot completo em um único arquivo — CPR-vCodex no app0
+          #    (boot padrão, 0x10000) + editor no app1 (0x650000)
+          esptool.py --chip esp32c3 merge_bin \
+            --flash_mode dio --flash_size 16MB \
+            -o dualboot-cpr-vcodex-${TAG}-microwriter-full.bin \
+            0x0     "$CV_BOOT" \
+            0x8000  "$CV_PART" \
+            0xe000  "$BOOT_APP0" \
+            0x10000 "$CV_FW" \
+            0x650000 "$ED_FW"
+
+          # 4) Slot-only — para quem já tem dual-boot e quer atualizar só o CPR-vCodex
+          cp "$CV_FW" cpr-vcodex-${TAG}-dualboot-slot-only.bin
+
+          # 5) Slot-only — para quem já tem dual-boot e quer atualizar só o editor
+          cp "$ED_FW" microwriter-editor-dualboot-slot-only.bin
+
+      # -----------------------------------------------------------------------
+      # Publicar release
+      # -----------------------------------------------------------------------
+      - name: Publicar release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: cpr-vcodex-${{ github.event.inputs.cpr_vcodex_tag }}-dualboot
+          name: "CPR-vCodex ${{ github.event.inputs.cpr_vcodex_tag }} + MicroWriter Dual-Boot"
+          files: |
+            cpr-vcodex-${{ github.event.inputs.cpr_vcodex_tag }}-standalone-full.bin
+            microwriter-editor-standalone-full.bin
+            dualboot-cpr-vcodex-${{ github.event.inputs.cpr_vcodex_tag }}-microwriter-full.bin
+            cpr-vcodex-${{ github.event.inputs.cpr_vcodex_tag }}-dualboot-slot-only.bin
+            microwriter-editor-dualboot-slot-only.bin
+          body: |
+            ## CPR-vCodex ${{ github.event.inputs.cpr_vcodex_tag }} + MicroWriter — Dual-Boot
+
+            Compilado a partir do CPR-vCodex oficial
+            `${{ github.event.inputs.cpr_vcodex_tag }}` com os patches de dual-boot
+            deste repo (`patches/cpr-vcodex/`) aplicados automaticamente em CI, mais
+            o editor deste repo (`editor/`).
+
+            No menu Home/Apps do CPR-vCodex aparece uma entrada **MicroSlate**; no
+            menu do editor aparece uma entrada **CPR-vCodex** — cada uma reinicia no
+            outro app. O autoupdate de firmware do CPR-vCodex está protegido contra
+            sobrescrever o slot do editor (veja
+            `patches/cpr-vcodex/08_patch_self_update_guard.py`).
+
+            ### Qual arquivo usar?
+
+            | Situação | Arquivo | Endereço |
+            |---|---|---|
+            | Instalação do zero, dual-boot completo (recomendado) | `dualboot-cpr-vcodex-*-microwriter-full.bin` | `0x0` |
+            | Instalação do zero, só CPR-vCodex | `cpr-vcodex-*-standalone-full.bin` | `0x0` |
+            | Instalação do zero, só o editor | `microwriter-editor-standalone-full.bin` | `0x0` |
+            | Já tem dual-boot, atualizar só o CPR-vCodex | `cpr-vcodex-*-dualboot-slot-only.bin` | `0x10000` |
+            | Já tem dual-boot, atualizar só o editor | `microwriter-editor-dualboot-slot-only.bin` | `0x650000` |
+
+            ### Como gravar (browser)
+
+            Acesse [esp.huhn.me](https://esp.huhn.me) no Chrome/Edge, conecte o X4,
+            selecione o arquivo e informe o endereço correto.
+
+            ### Como gravar (terminal)
+
+            ```bash
+            # Dual-boot completo, do zero
+            esptool.py --chip esp32c3 --port COM5 --baud 460800 \
+              write_flash 0x0 dualboot-cpr-vcodex-*-microwriter-full.bin
+
+            # Atualizar só o CPR-vCodex (dual-boot já instalado)
+            esptool.py --chip esp32c3 --port COM5 --baud 460800 \
+              write_flash 0x10000 cpr-vcodex-*-dualboot-slot-only.bin
+
+            # Atualizar só o editor (dual-boot já instalado)
+            esptool.py --chip esp32c3 --port COM5 --baud 460800 \
+              write_flash 0x650000 microwriter-editor-dualboot-slot-only.bin
+            ```
