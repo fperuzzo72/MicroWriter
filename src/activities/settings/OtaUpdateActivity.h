@@ -21,6 +21,7 @@ class OtaUpdateActivity : public Activity {
   State state = WIFI_SELECTION;
   unsigned int lastUpdaterPercentage = UNINITIALIZED_PERCENTAGE;
   OtaUpdater updater;
+  bool blockedBySibling = false;  // last install attempt refused: dual-boot sibling in the other slot
 
   void onWifiSelectionComplete(bool success);
   void checkForUpdateNow();

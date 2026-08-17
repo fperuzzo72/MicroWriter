@@ -9,12 +9,15 @@
 // (used by its own SD/OTA self-update), so this reuses that instead of
 // duplicating it.
 //
-// IMPORTANT: CPR-vCodex's own firmware self-update (Settings > Check for
-// Updates / SD Firmware Update, see FirmwareFlasher.cpp) always targets
-// esp_ota_get_next_update_partition() — i.e. "the other OTA slot" — with no
-// awareness that MicroSlate lives there in a dual-boot setup. Using either
-// update feature will silently overwrite the MicroSlate partition. No
-// guard against this exists yet.
+// CPR-vCodex's own firmware self-update (Settings > Check for Updates / SD
+// Firmware Update) always targets esp_ota_get_next_update_partition() —
+// i.e. "the other OTA slot" — which in a dual-boot setup is where the
+// MicroWriter X4 editor lives. FirmwareFlasher.cpp guards against this:
+// destHoldsForeignApp() compares that partition's embedded app descriptor
+// against the running app's own and refuses the update (before erasing
+// anything) if they differ, rather than overwrite the editor or leave
+// otadata pointing somewhere the dual-boot switch can no longer make sense
+// of. See FirmwareFlasher.h.
 //
 // Requires the ota_0/ota_1 partitions.csv layout this project already
 // ships, which matches MicroSlate's own partition table byte for byte.
@@ -100,9 +103,11 @@ inline void switchToOtaApp(int subtype) {
   }
 }
 
-// Convenience for the "MicroSlate" shortcut: this firmware only ever has one
-// dual-boot sibling, so just switch to whichever OTA app is detected first
-// (a no-op if the other slot has never been flashed).
+// Convenience for the "MicroWriter X4" shortcut (ShortcutId::MicroSlate —
+// named after the editor's underlying codebase, MicroSlate, not its display
+// name): this firmware only ever has one dual-boot sibling, so just switch
+// to whichever OTA app is detected first (a no-op if the other slot has
+// never been flashed).
 inline void switchToFirstOtaApp() {
   OtaAppEntry apps[MAX_OTA_APPS];
   const int count = detectOtaApps(apps, MAX_OTA_APPS);

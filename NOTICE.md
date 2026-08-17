@@ -108,6 +108,12 @@ personal US-International-keyboard-layout fork of
 this repo's tree**. See that repo's own `LICENSE`/notices for its MIT
 attribution.
 
+On-device, this editor registers itself via `registerOtaAppName` as
+"MicroWriter X4" (the name this reader's Home/Apps shortcut shows for it),
+not "MicroSlate" — a display-name choice for the bundle as a whole, not a
+change of attribution. The underlying codebase remains MicroSlate, credited
+above and in that repo's own notices.
+
 ## Previously explored, not used
 
 Two earlier bases were built, flashed to a physical Xteink X4, and compared

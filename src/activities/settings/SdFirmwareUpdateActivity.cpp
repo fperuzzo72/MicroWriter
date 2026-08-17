@@ -84,6 +84,17 @@ bool SdFirmwareUpdateActivity::validateFirmware() {
     errorMessage = tr(STR_INVALID_FIRMWARE);
     return false;
   }
+
+  // Dual-boot guard: check before the user ever sees the confirmation
+  // prompt, not just inside flashFromSdPath's final gate. See
+  // FirmwareFlasher.h for why — this OTA slot may hold the MicroWriter X4
+  // editor rather than a spare CPR-vCodex A/B slot.
+  if (firmware_flash::destHoldsForeignApp(dest)) {
+    LOG_ERR("FW", "next-update partition '%s' holds a different app — blocking update", dest->label);
+    errorMessage = tr(STR_FIRMWARE_UPDATE_BLOCKED_SIBLING);
+    return false;
+  }
+
   const size_t partitionLimit = dest->size;
   if (firmwareSize > partitionLimit) {
     LOG_ERR("FW", "firmware (%u bytes) exceeds partition (%u bytes)", static_cast<unsigned>(firmwareSize),

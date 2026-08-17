@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <HalStorage.h>
 #include <Logging.h>
+#include <esp_app_format.h>
 #include <esp_ota_ops.h>
 #include <esp_partition.h>
 #include <mbedtls/sha256.h>
@@ -60,8 +61,26 @@ const char* resultName(Result r) {
       return "WRITE_FAIL";
     case Result::OTADATA_FAIL:
       return "OTADATA_FAIL";
+    case Result::SIBLING_APP_PROTECTED:
+      return "SIBLING_APP_PROTECTED";
   }
   return "?";
+}
+
+// True if `dest` currently holds a different app than the one running now —
+// i.e. it's the dual-boot sibling (the MicroWriter X4 editor), not a spare
+// A/B slot for this same firmware. An unflashed/unreadable partition (no
+// valid esp_app_desc_t) is treated as safe: there's no sibling to protect.
+// Exposed (not file-local) so callers can pre-check before even showing the
+// update confirmation prompt, not just inside flashFromSdPath.
+bool destHoldsForeignApp(const esp_partition_t* dest) {
+  esp_app_desc_t myDesc;
+  esp_app_desc_t destDesc;
+  const esp_partition_t* running = esp_ota_get_running_partition();
+  if (!running) return false;
+  if (esp_ota_get_partition_description(running, &myDesc) != ESP_OK) return false;
+  if (esp_ota_get_partition_description(dest, &destDesc) != ESP_OK) return false;
+  return strncmp(myDesc.project_name, destDesc.project_name, sizeof(myDesc.project_name)) != 0;
 }
 
 namespace {
@@ -234,6 +253,12 @@ Result flashFromSdPath(const char* sdPath, ProgressCb onProgress, void* ctx, boo
   if (!dest) {
     LOG_ERR("FLASH", "no next-update partition");
     return Result::NO_PARTITION;
+  }
+
+  if (destHoldsForeignApp(dest)) {
+    LOG_ERR("FLASH", "next-update partition '%s' holds a different app (dual-boot sibling) — refusing to overwrite",
+            dest->label);
+    return Result::SIBLING_APP_PROTECTED;
   }
 
   // When the caller already ran validateImageFile() against this same partition

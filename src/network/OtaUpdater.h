@@ -21,6 +21,7 @@ class OtaUpdater {
     UPDATE_OLDER_ERROR,
     INTERNAL_UPDATE_ERROR,
     OOM_ERROR,
+    SIBLING_APP_PROTECTED,  // dual-boot sibling (editor) would be overwritten; update refused
   };
 
   size_t getOtaSize() const { return otaSize; }

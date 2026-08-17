@@ -62,7 +62,7 @@ lives there — using either update path will silently overwrite it.
 - [x] Reader + writer dual-boot switch (this)
 - [ ] Icons for the "MicroSlate"/reader-return shortcuts (currently a
       placeholder text icon)
-- [ ] Guard CPR-vCodex's self-update from overwriting the editor slot
+- [x] Guard CPR-vCodex's self-update from overwriting the editor slot
 - [ ] More editor functionality on the MicroSlate side (this project's
       name anticipates growing beyond stock MicroSlate here)
 - [ ] Third boot slot: a Game Boy emulator (SUMI's `src/plugins/gb/` is

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <esp_partition.h>
+
 #include <cstddef>
 #include <cstdint>
 
@@ -30,6 +32,7 @@ enum class Result {
   ERASE_FAIL,
   WRITE_FAIL,
   OTADATA_FAIL,
+  SIBLING_APP_PROTECTED,  // next-update partition holds a foreign app (dual-boot sibling)
 };
 
 // Progress callback: called after every chunk write. `written`/`total` are bytes.
@@ -39,6 +42,17 @@ using ProgressCb = void (*)(size_t written, size_t total, void* ctx);
 // next OTA app partition with interleaved 64 KiB erase + sector writes. On
 // success switches otadata via ota_boot::switchTo. Caller is responsible for
 // ESP.restart() afterwards.
+//
+// Dual-boot guard: before touching anything, compares the next-update
+// partition's own embedded app descriptor (esp_app_desc_t::project_name)
+// against the running app's. In a dual-boot setup that slot holds the
+// MicroWriter X4 editor, not a spare CPR-vCodex A/B slot — project_name
+// will differ, and this returns SIBLING_APP_PROTECTED without erasing a
+// single byte, rather than overwrite it (or leave otadata pointing at a
+// slot that's mid-write / no longer holds what the dual-boot switch
+// expects, which would strand the editor as unreachable even if its bytes
+// happened to survive). An unflashed/unreadable slot reads as "not a
+// sibling" and updates normally, same as plain CPR-vCodex self-update.
 //
 // `alreadyValidated` lets callers that have just run `validateImageFile()`
 // themselves (e.g. SdFirmwareUpdateActivity, which validates before showing
@@ -57,6 +71,13 @@ Result flashFromSdPath(const char* sdPath, ProgressCb onProgress, void* ctx, boo
 // lookup). Streams the file in CHUNK-sized reads; the file is rewound on
 // success so the caller can immediately reread it for flashing.
 Result validateImageFile(const char* sdPath, size_t partitionSize);
+
+// True if `dest` (an OTA app partition) holds a different app than the one
+// currently running — i.e. it's the dual-boot sibling (MicroWriter X4),
+// not a spare A/B slot for this same firmware. Lets callers warn/block
+// before even starting the update flow; flashFromSdPath also checks this
+// itself as the final gate.
+bool destHoldsForeignApp(const esp_partition_t* dest);
 
 const char* resultName(Result r);
 

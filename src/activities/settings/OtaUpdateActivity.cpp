@@ -186,11 +186,16 @@ void OtaUpdateActivity::render(RenderLock&&) {
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   } else if (state == FAILED) {
     renderer.drawCenteredText(UI_10_FONT_ID, top, tr(STR_UPDATE_FAILED), true, EpdFontFamily::BOLD);
-    renderer.drawCenteredText(UI_10_FONT_ID, top + height + metrics.verticalSpacing,
-                              (std::string(tr(STR_CURRENT_VERSION)) + CROSSPOINT_VERSION).c_str());
-    if (!updater.getLatestVersion().empty()) {
-      renderer.drawCenteredText(UI_10_FONT_ID, top + height * 2 + metrics.verticalSpacing * 2,
-                                buildNewVersionLine(updater).c_str());
+    if (blockedBySibling) {
+      renderer.drawCenteredText(UI_10_FONT_ID, top + height + metrics.verticalSpacing,
+                                tr(STR_FIRMWARE_UPDATE_BLOCKED_SIBLING));
+    } else {
+      renderer.drawCenteredText(UI_10_FONT_ID, top + height + metrics.verticalSpacing,
+                                (std::string(tr(STR_CURRENT_VERSION)) + CROSSPOINT_VERSION).c_str());
+      if (!updater.getLatestVersion().empty()) {
+        renderer.drawCenteredText(UI_10_FONT_ID, top + height * 2 + metrics.verticalSpacing * 2,
+                                  buildNewVersionLine(updater).c_str());
+      }
     }
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_RETRY), "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
@@ -226,6 +231,7 @@ void OtaUpdateActivity::loop() {
         LOG_DBG("OTA", "Update failed: %d", res);
         {
           RenderLock lock(*this);
+          blockedBySibling = (res == OtaUpdater::SIBLING_APP_PROTECTED);
           state = FAILED;
         }
         requestUpdate();

@@ -328,10 +328,11 @@ void setup() {
   silentRebootTarget = 0;
 
   gpio.begin();
-  // Announce this app's name to any dual-boot sibling (MicroSlate, the
-  // editor) so its menu can show "MicroWriter X4" instead of a generic
-  // "OTA Slot N" fallback. See src/util/OtaApps.h.
-  registerOtaAppName("MicroWriter X4");
+  // Announce this app's name to any dual-boot sibling (the MicroWriter X4
+  // editor) so its menu can show "CPR-vCodex" — this firmware's own
+  // official name (see STR_CPR_VCODEX, shown on the boot/sleep screens) —
+  // instead of a generic "OTA Slot N" fallback. See src/util/OtaApps.h.
+  registerOtaAppName("CPR-vCodex");
   powerManager.begin();
   halTiltSensor.begin();
   halClock.begin();
