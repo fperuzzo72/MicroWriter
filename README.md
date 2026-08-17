@@ -86,16 +86,26 @@ d-pad + power button, BLE 5.0, SD card.
 
 ## Building
 
-Reader (this repo):
+This repo holds both firmwares — the reader at the repo root, the editor
+at `editor/` — as two independent PlatformIO projects. Build each from its
+own directory:
 
 ```bash
+# Reader
 pio run -e default
 pio run -e default -t upload
+
+# Editor
+cd editor
+IDF_COMPONENT_MANAGER=0 pio run -e xteink_x4
+pio run -e xteink_x4 -t upload
 ```
 
-Editor: build `xteink_x4` from
+`editor/` was imported from
 [microslate-firmware-US-International](https://github.com/fperuzzo72/microslate-firmware-US-International)
-(`IDF_COMPONENT_MANAGER=0 pio run -e xteink_x4`).
+at its `microwriter-0.1` tag — that repo stays up as the frozen historical
+record, but active editor development now happens here, at `editor/`, not
+there. See `NOTICE.md` for the full attribution.
 
 To flash a complete dual-boot image from scratch:
 

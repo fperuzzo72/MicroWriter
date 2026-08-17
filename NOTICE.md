@@ -7,10 +7,12 @@ git history for that first attempt and why it was dropped). This file
 preserves the original copyright notices as required by the MIT license on
 each source.
 
-This repo carries the **reader** half of a two-firmware dual-boot bundle.
-The **editor** half (MicroSlate) is built from its own separate repo and
-merged in at the binary level, not copied into this tree — see its own
-license notices in that repo.
+This repo carries both halves of the two-firmware dual-boot bundle: the
+**reader** at the repo root, and the **editor** (MicroSlate) at `editor/`
+— two independent firmwares, each with its own `platformio.ini`, merged
+only at the binary level (flashed to separate OTA slots), not sharing
+source. See the "MicroSlate" section below for `editor/`'s own origin and
+license notices.
 
 ## CPR-vCodex — base firmware (Activity architecture, reading engine,
 ## rendering stack, reading statistics, dictionary, flashcards, KOReader
@@ -101,12 +103,16 @@ MicroSlate.
 
 ## MicroSlate — the editor half of this dual-boot pair
 
-Built and flashed as its own independent firmware from
-<https://github.com/fperuzzo72/microslate-firmware-US-International> (a
-personal US-International-keyboard-layout fork of
-<https://github.com/Josh-writes/microslate-firmware>) — **not copied into
-this repo's tree**. See that repo's own `LICENSE`/notices for its MIT
-attribution.
+Lives at `editor/` in this repo — its own independent firmware (own
+`platformio.ini`, builds separately, flashed to the other OTA slot) — as
+of MicroWriter 0.1, imported from
+<https://github.com/fperuzzo72/microslate-firmware-US-International>
+(a personal US-International-keyboard-layout fork of
+<https://github.com/Josh-writes/microslate-firmware>) at its own
+`microwriter-0.1` tag. That original repo stays up, frozen at that same
+tag, as the historical record and MIT attribution source (`editor/LICENSE`
+is preserved unchanged in the copy) — but going forward, all editor
+development happens here, at `editor/`, not there.
 
 On-device, this editor registers itself via `registerOtaAppName` as
 "MicroWriter" (the name this reader's Home/Apps shortcut shows for it, and

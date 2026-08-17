@@ -1,0 +1,328 @@
+name: Build CrossPoint Dual-Boot
+
+on:
+  workflow_dispatch:
+    inputs:
+      crosspoint_tag:
+        description: 'Tag do CrossPoint a compilar (ex: 1.4.1)'
+        required: true
+        default: '1.4.1'
+
+permissions:
+  contents: write
+
+jobs:
+  build-crosspoint:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout MicroSlate fork
+        uses: actions/checkout@v4
+        with:
+          path: microslate
+
+      - name: Checkout CrossPoint na tag especificada
+        uses: actions/checkout@v4
+        with:
+          repository: crosspoint-reader/crosspoint-reader
+          ref: ${{ github.event.inputs.crosspoint_tag }}
+          submodules: recursive
+          path: crosspoint
+
+      # -----------------------------------------------------------------------
+      # Patch 1: OtaApps.h — arquivo novo, sem conflito
+      # -----------------------------------------------------------------------
+      - name: "Patch 1/4 — Criar OtaApps.h"
+        run: |
+          cat > crosspoint/src/OtaApps.h << 'EOF'
+          #pragma once
+          #include <esp_ota_ops.h>
+          #include <Preferences.h>
+
+          static constexpr int MAX_OTA_APPS = 4;
+
+          struct OtaAppEntry {
+            char name[32];
+            int  partitionSubtype;
+          };
+
+          // Grava o nome deste app no NVS, indexado pelo slot OTA em que está rodando.
+          inline void registerOtaAppName(const char* name) {
+            const esp_partition_t* self = esp_ota_get_running_partition();
+            if (!self) return;
+            int slot = self->subtype - ESP_PARTITION_SUBTYPE_APP_OTA_0;
+            char key[8];
+            snprintf(key, sizeof(key), "ota_%d", slot);
+            Preferences prefs;
+            prefs.begin("ota_names", false);
+            prefs.putString(key, name);
+            prefs.end();
+          }
+
+          // Varre todos os slots OTA exceto o corrente e preenche `apps[]`.
+          // Retorna o número de apps encontrados.
+          inline int detectOtaApps(OtaAppEntry* apps, int maxApps) {
+            int count = 0;
+            const esp_partition_t* running = esp_ota_get_running_partition();
+            Preferences prefs;
+            prefs.begin("ota_names", true);
+            esp_partition_iterator_t it = esp_partition_find(
+                ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_ANY, NULL);
+            while (it && count < maxApps) {
+              const esp_partition_t* p = esp_partition_get(it);
+              if (p && p != running
+                     && p->subtype >= ESP_PARTITION_SUBTYPE_APP_OTA_0
+                     && p->subtype <= ESP_PARTITION_SUBTYPE_APP_OTA_15) {
+                esp_app_desc_t desc;
+                if (esp_ota_get_partition_description(p, &desc) == ESP_OK) {
+                  int slot = p->subtype - ESP_PARTITION_SUBTYPE_APP_OTA_0;
+                  char key[8];
+                  snprintf(key, sizeof(key), "ota_%d", slot);
+                  String nvsName = prefs.getString(key, "");
+                  OtaAppEntry& e = apps[count];
+                  if (nvsName.length() > 0)
+                    strncpy(e.name, nvsName.c_str(), sizeof(e.name) - 1);
+                  else
+                    snprintf(e.name, sizeof(e.name), "OTA Slot %d", slot);
+                  e.name[sizeof(e.name) - 1] = '\0';
+                  e.partitionSubtype = p->subtype;
+                  count++;
+                }
+              }
+              it = esp_partition_next(it);
+            }
+            esp_partition_iterator_release(it);
+            prefs.end();
+            return count;
+          }
+
+          // Troca o boot partition para `subtype` e reinicia.
+          inline void switchToOtaApp(int subtype) {
+            const esp_partition_t* target = esp_partition_find_first(
+                ESP_PARTITION_TYPE_APP,
+                static_cast<esp_partition_subtype_t>(subtype), NULL);
+            if (!target) return;
+            esp_ota_set_boot_partition(target);
+            esp_restart();
+          }
+          EOF
+
+      # -----------------------------------------------------------------------
+      # Patch 2: HomeActivity.h — include + dois campos novos
+      # Na 1.4 o include mudou para "activities/Activity.h" (sem "../")
+      # -----------------------------------------------------------------------
+      - name: "Patch 2/4 — HomeActivity.h"
+        run: |
+          python3 - << 'PYEOF'
+          import re
+
+          path = "crosspoint/src/activities/home/HomeActivity.h"
+          src = open(path).read()
+
+          # 2a. Inserir include do OtaApps.h após o include do FileBrowserActivity
+          src = src.replace(
+              '#include "./FileBrowserActivity.h"',
+              '#include "./FileBrowserActivity.h"\n#include "OtaApps.h"'
+          )
+
+          # 2b. Inserir campos na classe, após ButtonNavigator buttonNavigator;
+          src = src.replace(
+              'ButtonNavigator buttonNavigator;',
+              'ButtonNavigator buttonNavigator;\n  OtaAppEntry otaApps[MAX_OTA_APPS] = {};\n  int otaAppCount = 0;'
+          )
+
+          open(path, 'w').write(src)
+          print("HomeActivity.h: OK")
+          PYEOF
+
+      # -----------------------------------------------------------------------
+      # Patch 3: HomeActivity.cpp — quatro pontos de mudança
+      #
+      # Na 1.4 o loop usa switch(indexToMenuItem(...)) com default: break.
+      # A estratégia: OTA apps ficam em índices além de SETTINGS_MENU.
+      # indexToMenuItem() retorna NONE para esses índices — o default: do
+      # switch já os ignora. Adicionamos um bloco separado após o switch
+      # para tratar o índice OTA.
+      # -----------------------------------------------------------------------
+      - name: "Patch 3/4 — HomeActivity.cpp"
+        run: |
+          python3 - << 'PYEOF'
+          import re
+
+          path = "crosspoint/src/activities/home/HomeActivity.cpp"
+          src = open(path).read()
+
+          # 3a. getMenuItemCount: incluir otaAppCount na contagem
+          src = src.replace(
+              'int count = 4;  // File Browser, Recents, File transfer, Settings',
+              'int count = 4 + otaAppCount;  // File Browser, Recents, File transfer, Settings, OTA apps'
+          )
+
+          # 3b. onEnter: detectar OTA apps logo após hasOpdsServers
+          src = src.replace(
+              'hasOpdsServers = OPDS_STORE.hasServers();',
+              'hasOpdsServers = OPDS_STORE.hasServers();\n  otaAppCount = detectOtaApps(otaApps, MAX_OTA_APPS);'
+          )
+
+          # 3c. loop: adicionar tratamento OTA após o bloco switch/case.
+          #     O default: já está presente — inserimos o bloco OTA dentro dele,
+          #     substituindo "default:\n          break;" pelo bloco expandido.
+          src = src.replace(
+              '        default:\n          break;\n      }\n    }\n  }\n}',
+              '        default: {\n          // Índices além de SETTINGS_MENU são OTA apps\n'
+              '          const int settingsMenuCount = hasOpdsServers ? 5 : 4;\n'
+              '          const int otaIdx = menuIndex - settingsMenuCount;\n'
+              '          if (otaIdx >= 0 && otaIdx < otaAppCount) {\n'
+              '            switchToOtaApp(otaApps[otaIdx].partitionSubtype);\n'
+              '          }\n'
+              '          break;\n'
+              '        }\n      }\n    }\n  }\n}'
+          )
+
+          # 3d. render: adicionar OTA apps no vetor antes de GUI.drawButtonMenu
+          src = src.replace(
+              '  GUI.drawButtonMenu(',
+              '  for (int i = 0; i < otaAppCount; i++) {\n'
+              '    menuItems.push_back(otaApps[i].name);\n'
+              '    menuIcons.push_back(Text);\n'
+              '  }\n\n  GUI.drawButtonMenu('
+          )
+
+          open(path, 'w').write(src)
+          print("HomeActivity.cpp: OK")
+          PYEOF
+
+      # -----------------------------------------------------------------------
+      # Patch 4: main.cpp — include + registerOtaAppName
+      # Na 1.4 o include de MappedInputManager foi removido do main.cpp;
+      # inserimos OtaApps.h junto aos outros includes locais.
+      # -----------------------------------------------------------------------
+      - name: "Patch 4/4 — main.cpp"
+        run: |
+          python3 - << 'PYEOF'
+          import re
+
+          path = "crosspoint/src/main.cpp"
+          src = open(path).read()
+
+          # 4a. Inserir include após util/ScreenshotUtil.h (último include local)
+          src = src.replace(
+              '#include "util/ScreenshotUtil.h"',
+              '#include "util/ScreenshotUtil.h"\n#include "OtaApps.h"'
+          )
+
+          # 4b. Registrar nome do app logo após gpio.begin()
+          src = src.replace(
+              '  gpio.begin();\n  powerManager.begin();',
+              '  gpio.begin();\n  registerOtaAppName("CrossPoint");\n  powerManager.begin();'
+          )
+
+          open(path, 'w').write(src)
+          print("main.cpp: OK")
+          PYEOF
+
+      # -----------------------------------------------------------------------
+      # Verificação
+      # -----------------------------------------------------------------------
+      - name: Verificar patch
+        run: |
+          set -e
+          grep -q "otaAppCount" crosspoint/src/activities/home/HomeActivity.cpp \
+            && echo "✅ HomeActivity.cpp: otaAppCount presente"
+          grep -q "detectOtaApps" crosspoint/src/activities/home/HomeActivity.cpp \
+            && echo "✅ HomeActivity.cpp: detectOtaApps presente"
+          grep -q "switchToOtaApp" crosspoint/src/activities/home/HomeActivity.cpp \
+            && echo "✅ HomeActivity.cpp: switchToOtaApp presente"
+          grep -q "OtaApps.h" crosspoint/src/activities/home/HomeActivity.h \
+            && echo "✅ HomeActivity.h: include OK"
+          grep -q "registerOtaAppName" crosspoint/src/main.cpp \
+            && echo "✅ main.cpp: registerOtaAppName presente"
+          test -f crosspoint/src/OtaApps.h \
+            && echo "✅ OtaApps.h: arquivo presente"
+
+      # -----------------------------------------------------------------------
+      # Build
+      # -----------------------------------------------------------------------
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependências de build
+        run: |
+          pip install uv
+          uv pip install --system -U \
+            https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
+          pip install -r crosspoint/scripts/requirements.txt
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: pio-crosspoint-${{ github.event.inputs.crosspoint_tag }}-${{ hashFiles('crosspoint/platformio.ini') }}
+          restore-keys: pio-crosspoint-
+
+      - name: Compilar CrossPoint com dual-boot
+        working-directory: crosspoint
+        run: pio run -e gh_release
+
+      # -----------------------------------------------------------------------
+      # Montar binários
+      # -----------------------------------------------------------------------
+      - name: Montar binários
+        run: |
+          pip install esptool
+          BOOT_APP0=$(find ~/.platformio -name "boot_app0.bin" | head -1)
+          TAG=${{ github.event.inputs.crosspoint_tag }}
+
+          # slot-only: firmware.bin isolado → gravar em 0x10000 (app0)
+          cp crosspoint/.pio/build/gh_release/firmware.bin \
+             crosspoint-dualboot-${TAG}-slot-only.bin
+
+          # merged completo → gravar em 0x0 (instalação do zero)
+          esptool.py --chip esp32c3 merge_bin \
+            --flash_mode dio --flash_size 16MB \
+            -o crosspoint-dualboot-${TAG}-full.bin \
+            0x0     crosspoint/.pio/build/gh_release/bootloader.bin \
+            0x8000  crosspoint/.pio/build/gh_release/partitions.bin \
+            0xe000  "$BOOT_APP0" \
+            0x10000 crosspoint/.pio/build/gh_release/firmware.bin
+
+      # -----------------------------------------------------------------------
+      # Publicar release
+      # -----------------------------------------------------------------------
+      - name: Publicar release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: crosspoint-${{ github.event.inputs.crosspoint_tag }}-dualboot
+          name: "CrossPoint ${{ github.event.inputs.crosspoint_tag }} Dual-Boot"
+          files: |
+            crosspoint-dualboot-${{ github.event.inputs.crosspoint_tag }}-slot-only.bin
+            crosspoint-dualboot-${{ github.event.inputs.crosspoint_tag }}-full.bin
+          body: |
+            ## CrossPoint ${{ github.event.inputs.crosspoint_tag }} com Dual-Boot
+
+            Compilado a partir do CrossPoint oficial `${{ github.event.inputs.crosspoint_tag }}`
+            com patch de dual-boot aplicado automaticamente em CI.
+
+            ### Qual arquivo usar?
+
+            | Situação | Arquivo | Endereço |
+            |---|---|---|
+            | Já tem dual-boot instalado, quer atualizar só o CrossPoint | `slot-only` | `0x10000` |
+            | Instalação do zero (sem MicroSlate ainda) | `full` | `0x0` |
+
+            ### Como gravar (browser)
+
+            Acesse [esp.huhn.me](https://esp.huhn.me) no Chrome/Edge, conecte o X4,
+            selecione o arquivo e informe o endereço correto.
+
+            ### Como gravar (terminal)
+
+            ```bash
+            # Atualizar só o CrossPoint (dual-boot já instalado)
+            esptool.py --chip esp32c3 --port COM5 --baud 460800 \
+              write_flash 0x10000 crosspoint-dualboot-*-slot-only.bin
+
+            # Instalação do zero
+            esptool.py --chip esp32c3 --port COM5 --baud 460800 \
+              write_flash 0x0 crosspoint-dualboot-*-full.bin
+            ```
