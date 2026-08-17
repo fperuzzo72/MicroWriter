@@ -6,13 +6,15 @@
 #include <I18n.h>
 
 #include <algorithm>
-#include <cctype>
 #include <climits>
 #include <cstdlib>
 #include <cstring>
 #include <optional>
 
 #include "CrossPointSettings.h"
+#include "DictionaryDefinitionActivity.h"
+#include "DictionaryStore.h"
+#include "DictionarySuggestionsActivity.h"
 #include "MappedInputManager.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -21,119 +23,6 @@ namespace {
 constexpr int HIGHLIGHT_PADDING_X = 2;
 constexpr int HIGHLIGHT_PADDING_Y = 1;
 constexpr int HIGHLIGHT_RADIUS = 3;
-
-// cleanWord() and its helpers below were DictionaryStore::cleanWord() before
-// the dictionary feature was removed (see NOTICE.md) — kept here as generic
-// word-trimming/normalizing text utilities, since mergeHyphenatedWords()
-// (highlight mode too, not just the old lookup path) still needs them.
-
-std::string lowercaseLatinUtf8(const std::string& input) {
-  std::string out;
-  out.reserve(input.size());
-  for (size_t i = 0; i < input.size(); ++i) {
-    const unsigned char c = static_cast<unsigned char>(input[i]);
-    if (c < 0x80) {
-      out.push_back(static_cast<char>(std::tolower(c)));
-      continue;
-    }
-    if (c == 0xC3 && i + 1 < input.size()) {
-      const unsigned char n = static_cast<unsigned char>(input[i + 1]);
-      if (n >= 0x80 && n <= 0x96 && n != 0x97) {
-        out.push_back(static_cast<char>(0xC3));
-        out.push_back(static_cast<char>(n + 0x20));
-        ++i;
-        continue;
-      }
-      if (n == 0x9C) {
-        out.push_back(static_cast<char>(0xC3));
-        out.push_back(static_cast<char>(0xBC));
-        ++i;
-        continue;
-      }
-    }
-    out.push_back(input[i]);
-  }
-  return out;
-}
-
-bool isAsciiTrimChar(unsigned char c) { return c < 0x80 && !std::isalnum(c); }
-
-bool matchTokenAt(const std::string& text, const size_t pos, const char* token) {
-  const size_t len = strlen(token);
-  return pos + len <= text.size() && text.compare(pos, len, token) == 0;
-}
-
-bool isUtf8TrimPrefix(const std::string& text, const size_t pos, size_t& tokenLen) {
-  static constexpr const char* TOKENS[] = {"\xC2\xA1",     "\xC2\xAB",     "\xC2\xBB",     "\xC2\xBF",
-                                           "\xE2\x80\x93", "\xE2\x80\x94", "\xE2\x80\x98", "\xE2\x80\x99",
-                                           "\xE2\x80\x9C", "\xE2\x80\x9D", "\xE2\x80\xA6"};
-  for (const char* token : TOKENS) {
-    if (matchTokenAt(text, pos, token)) {
-      tokenLen = strlen(token);
-      return true;
-    }
-  }
-  return false;
-}
-
-bool isUtf8TrimSuffix(const std::string& text, const size_t end, size_t& tokenLen) {
-  static constexpr const char* TOKENS[] = {"\xC2\xA1",     "\xC2\xAB",     "\xC2\xBB",     "\xC2\xBF",
-                                           "\xE2\x80\x93", "\xE2\x80\x94", "\xE2\x80\x98", "\xE2\x80\x99",
-                                           "\xE2\x80\x9C", "\xE2\x80\x9D", "\xE2\x80\xA6"};
-  for (const char* token : TOKENS) {
-    const size_t len = strlen(token);
-    if (end >= len && text.compare(end - len, len, token) == 0) {
-      tokenLen = len;
-      return true;
-    }
-  }
-  return false;
-}
-
-std::string cleanWord(const std::string& word) {
-  if (word.empty()) return "";
-
-  size_t start = 0;
-  while (start < word.size()) {
-    const unsigned char c = static_cast<unsigned char>(word[start]);
-    if (c < 0x80 && isAsciiTrimChar(c)) {
-      ++start;
-      continue;
-    }
-    size_t tokenLen = 0;
-    if (isUtf8TrimPrefix(word, start, tokenLen)) {
-      start += tokenLen;
-      continue;
-    }
-    break;
-  }
-
-  size_t end = word.size();
-  while (end > start) {
-    const unsigned char c = static_cast<unsigned char>(word[end - 1]);
-    if (c < 0x80 && isAsciiTrimChar(c)) {
-      --end;
-      continue;
-    }
-    size_t tokenLen = 0;
-    if (isUtf8TrimSuffix(word, end, tokenLen)) {
-      end -= tokenLen;
-      continue;
-    }
-    break;
-  }
-  if (start >= end) return "";
-
-  std::string out = word.substr(start, end - start);
-  for (size_t i = 0; i + 1 < out.size();) {
-    if (static_cast<unsigned char>(out[i]) == 0xC2 && static_cast<unsigned char>(out[i + 1]) == 0xAD) {
-      out.erase(i, 2);
-    } else {
-      ++i;
-    }
-  }
-  return lowercaseLatinUtf8(out);
-}
 
 std::string visibleHighlightWord(const std::string& word) {
   if (word.size() >= 3 && static_cast<unsigned char>(word[0]) == 0xE2 && static_cast<unsigned char>(word[1]) == 0x80 &&
@@ -181,7 +70,7 @@ void DictionaryWordSelectActivity::extractWords() {
     const size_t count = block->wordCount();
     for (size_t i = 0; i < count; ++i) {
       const std::string word = block->wordText(i);
-      const std::string cleaned = highlightPhraseMode ? visibleHighlightWord(word) : cleanWord(word);
+      const std::string cleaned = highlightPhraseMode ? visibleHighlightWord(word) : DictionaryStore::cleanWord(word);
       if (cleaned.find_first_not_of(" \t\r\n") == std::string::npos) continue;
       const int16_t x = static_cast<int16_t>(line.xPos + block->wordXpos(i) + marginLeft);
       const int16_t y = static_cast<int16_t>(line.yPos + marginTop + rubyShift);
@@ -257,7 +146,7 @@ void DictionaryWordSelectActivity::mergeHyphenatedWords() {
       first.erase(first.size() - 2);
     }
 
-    const std::string merged = cleanWord(first + words[nextIndex].text);
+    const std::string merged = DictionaryStore::cleanWord(first + words[nextIndex].text);
     if (merged.empty()) continue;
     words[lastIndex].lookupText = merged;
     words[nextIndex].lookupText = merged;
@@ -525,6 +414,81 @@ void DictionaryWordSelectActivity::confirmHighlightSelection() {
   finish();
 }
 
+void DictionaryWordSelectActivity::lookupSelectedWord() {
+  if (rows.empty()) return;
+  const int wordIndex = rows[currentRow].wordIndices[currentWordInRow];
+  const std::string query = words[wordIndex].lookupText.empty() ? DictionaryStore::cleanWord(words[wordIndex].text)
+                                                                : words[wordIndex].lookupText;
+  freeSelectionRegionCache();
+  if (auto* fcm = renderer.getFontCacheManager()) {
+    fcm->clearCache();
+  }
+  if (query.empty()) {
+    GUI.drawPopup(renderer, tr(STR_LOOKUP_EMPTY_PAGE));
+    renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+    delay(700);
+    requestUpdate();
+    return;
+  }
+
+  Rect popup;
+  {
+    RenderLock lock(*this);
+    popup = GUI.drawPopup(renderer, tr(STR_DICTIONARY_PREPARING));
+  }
+  if (!DICTIONARIES.prepareActive([this, &popup](int percent) {
+        RenderLock lock(*this);
+        GUI.fillPopupProgress(renderer, popup, percent);
+      })) {
+    GUI.drawPopup(renderer, tr(STR_DICTIONARY_NOT_READY));
+    renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+    delay(900);
+    requestUpdate();
+    return;
+  }
+
+  {
+    RenderLock lock(*this);
+    popup = GUI.drawPopup(renderer, tr(STR_DICTIONARY_LOOKUP));
+  }
+  const auto lookup = DICTIONARIES.lookup(query, true);
+  if (lookup.status == DictionaryLookupResult::Status::Found) {
+    startActivityForResult(std::make_unique<DictionaryDefinitionActivity>(
+                               renderer, mappedInput, page, lookup.headword, lookup.definition, lookup.truncated,
+                               readerFontId, DICTIONARIES.getDefinitionFontId(readerFontId), marginLeft, marginTop),
+                           [this](const ActivityResult& result) {
+                             if (!result.isCancelled) {
+                               setResult(ActivityResult{});
+                               finish();
+                               return;
+                             }
+                             requestUpdate();
+                           });
+    return;
+  }
+
+  if (!lookup.suggestions.empty()) {
+    startActivityForResult(
+        std::make_unique<DictionarySuggestionsActivity>(renderer, mappedInput, page, query, lookup.suggestions,
+                                                        readerFontId, marginLeft, marginTop),
+        [this](const ActivityResult& result) {
+          if (!result.isCancelled) {
+            setResult(ActivityResult{});
+            finish();
+            return;
+          }
+          requestUpdate();
+        });
+    return;
+  }
+
+  GUI.drawPopup(renderer, lookup.status == DictionaryLookupResult::Status::NoDictionary
+                              ? tr(STR_DICTIONARY_NONE_SELECTED)
+                              : tr(STR_DEFINITION_NOT_FOUND));
+  renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+  delay(900);
+  requestUpdate();
+}
 
 void DictionaryWordSelectActivity::loop() {
   if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
@@ -540,11 +504,10 @@ void DictionaryWordSelectActivity::loop() {
     return;
   }
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-    // Dictionary lookup mode is gone (this class is only ever constructed
-    // with highlightPhraseMode=true now, from EpubReaderActivity's
-    // HIGHLIGHT_TEXT action) — see NOTICE.md for what was removed and why.
     if (highlightPhraseMode) {
       confirmHighlightSelection();
+    } else {
+      lookupSelectedWord();
     }
     return;
   }

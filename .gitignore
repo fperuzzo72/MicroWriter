@@ -22,3 +22,4 @@ build
 *.local*
 *.log
 /.codex-build/
+/dualboot_artifacts/

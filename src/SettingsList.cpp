@@ -177,8 +177,8 @@ const std::vector<SettingInfo>& getSettingsList() {
         SettingInfo::Enum(StrId::STR_FLASHCARDS, &CrossPointSettings::flashcardsShortcut,
                           {StrId::STR_HOME_LOCATION, StrId::STR_APPS}, "flashcardsShortcut",
                           StrId::STR_SHORTCUTS_SECTION),
-        SettingInfo::Enum(StrId::STR_WRITE, &CrossPointSettings::writeShortcut,
-                          {StrId::STR_HOME_LOCATION, StrId::STR_APPS}, "writeShortcut",
+        SettingInfo::Enum(StrId::STR_DICTIONARY, &CrossPointSettings::dictionaryShortcut,
+                          {StrId::STR_HOME_LOCATION, StrId::STR_APPS}, "dictionaryShortcut",
                           StrId::STR_SHORTCUTS_SECTION),
         SettingInfo::Enum(StrId::STR_FILE_TRANSFER, &CrossPointSettings::fileTransferShortcut,
                           {StrId::STR_HOME_LOCATION, StrId::STR_APPS}, "fileTransferShortcut",
@@ -188,6 +188,9 @@ const std::vector<SettingInfo>& getSettingsList() {
                           StrId::STR_SHORTCUTS_SECTION),
         SettingInfo::Enum(StrId::STR_SLEEP, &CrossPointSettings::sleepShortcut,
                           {StrId::STR_HOME_LOCATION, StrId::STR_APPS}, "sleepShortcut", StrId::STR_SHORTCUTS_SECTION),
+        SettingInfo::Enum(StrId::STR_MICROSLATE, &CrossPointSettings::microslateShortcut,
+                          {StrId::STR_HOME_LOCATION, StrId::STR_APPS}, "microslateShortcut",
+                          StrId::STR_SHORTCUTS_SECTION),
 
         // --- KOReader Sync (web-only, uses KOReaderCredentialStore) ---
         SettingInfo::DynamicString(

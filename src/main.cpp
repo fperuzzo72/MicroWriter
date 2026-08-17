@@ -33,12 +33,12 @@
 #include "UiFontSelection.h"
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
-#include "ble/BleKeyboard.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "util/BootRecovery.h"
 #include "util/ButtonNavigator.h"
 #include "util/CprVcodexLogs.h"
+#include "util/OtaApps.h"
 #include "util/ScreenshotUtil.h"
 #include "util/TimeUtils.h"
 #include "version.h"
@@ -328,6 +328,10 @@ void setup() {
   silentRebootTarget = 0;
 
   gpio.begin();
+  // Announce this app's name to any dual-boot sibling (MicroSlate, the
+  // editor) so its menu can show "MicroWriter X4" instead of a generic
+  // "OTA Slot N" fallback. See src/util/OtaApps.h.
+  registerOtaAppName("MicroWriter X4");
   powerManager.begin();
   halTiltSensor.begin();
   halClock.begin();
@@ -360,11 +364,6 @@ void setup() {
   }
   // Stamp all SdFat creates/syncs with RTC time when available, else last Sync Day.
   TimeUtils::registerSdFatDateTimeCallback();
-
-  // BLE keyboard host: NimBLE's own runtime heap footprint is large enough to
-  // starve the EPUB reader if initialized unconditionally here. bleSetup() is
-  // now called lazily by WriterActivity::onEnter() (and torn down by
-  // bleShutdown() in onExit()) instead — see src/ble/BleKeyboard.h.
 
   HalSystem::checkPanic();
   BootRecovery::initialize();
@@ -554,20 +553,6 @@ void loop() {
 
   gpio.update();
   halTiltSensor.update(SETTINGS.tiltPageTurn, SETTINGS.orientation, activityManager.isReaderActivity());
-
-  bleLoop();  // no-op unless the Writer has initialized BLE
-#ifdef ENABLE_SERIAL_LOG
-  // Phase 1 verification only: no Settings UI or input routing exists yet
-  // for the BLE keyboard, so just prove press/release events arrive.
-  // TODO(MicroWriter): remove once real input routing consumes this queue.
-  {
-    BleKeyEvent bleEvt;
-    while (popBleKeyEvent(bleEvt)) {
-      LOG_INF("BLE", "key=0x%02X mod=0x%02X %s", bleEvt.keyCode, bleEvt.modifiers,
-              bleEvt.pressed ? "DOWN" : "UP");
-    }
-  }
-#endif
 
   renderer.setFadingFix(SETTINGS.fadingFix);
   renderer.setDarkMode(SETTINGS.darkMode);

@@ -29,6 +29,9 @@ std::vector<EpubReaderMenuActivity::MenuItem> EpubReaderMenuActivity::buildMenuI
   if (hasFootnotes) {
     items.push_back({MenuAction::FOOTNOTES, StrId::STR_FOOTNOTES});
   }
+  items.push_back({MenuAction::LOOK_UP_WORD, StrId::STR_LOOK_UP_WORD});
+  items.push_back({MenuAction::LOOKUP_HISTORY, StrId::STR_LOOKUP_HISTORY});
+  items.push_back({MenuAction::DICTIONARY, StrId::STR_DICTIONARY});
   items.push_back({MenuAction::VIEW_HIGHLIGHTS, StrId::STR_VIEW_HIGHLIGHTS});
   items.push_back({MenuAction::SAVE_PAGE_MARK, StrId::STR_SAVE_PAGE_MARK});
   items.push_back({MenuAction::HIGHLIGHT_TEXT, StrId::STR_HIGHLIGHT_TEXT});

@@ -380,8 +380,8 @@ class CrossPointSettings {
   uint8_t favoritesShortcutOrder = 13;
   uint8_t flashcardsShortcut = SHORTCUT_APPS;
   uint8_t flashcardsShortcutOrder = 14;
-  uint8_t writeShortcut = SHORTCUT_HOME;
-  uint8_t writeShortcutOrder = 15;
+  uint8_t dictionaryShortcut = SHORTCUT_APPS;
+  uint8_t dictionaryShortcutOrder = 15;
   uint8_t fileTransferShortcut = SHORTCUT_APPS;
   uint8_t fileTransferShortcutOrder = 16;
   uint8_t screenCleanShortcut = SHORTCUT_APPS;
@@ -390,6 +390,10 @@ class CrossPointSettings {
   uint8_t sleepShortcutOrder = 18;
   uint8_t opdsBrowserShortcut = SHORTCUT_HOME;
   uint8_t opdsBrowserShortcutOrder = 19;
+  // Dual-boot switch to the MicroSlate editor (see OtaApps.h). Defaults to
+  // Home — it's a primary function of this project, not a buried extra.
+  uint8_t microslateShortcut = SHORTCUT_HOME;
+  uint8_t microslateShortcutOrder = 20;
   uint8_t browseFilesShortcutVisible = 1;
   // Legacy Stats shortcut visibility retained for settings.json migration to readingStatsShortcut.
   uint8_t statsShortcutVisible = 1;
@@ -405,11 +409,12 @@ class CrossPointSettings {
   uint8_t bookmarksShortcutVisible = 1;
   uint8_t favoritesShortcutVisible = 1;
   uint8_t flashcardsShortcutVisible = 1;
-  uint8_t writeShortcutVisible = 1;
+  uint8_t dictionaryShortcutVisible = 1;
   uint8_t fileTransferShortcutVisible = 1;
   uint8_t screenCleanShortcutVisible = 1;
   uint8_t sleepShortcutVisible = 1;
   uint8_t opdsBrowserShortcutVisible = 1;
+  uint8_t microslateShortcutVisible = 1;
   // Sunlight fading compensation
   uint8_t fadingFix = 0;
   // Use book's embedded CSS styles for EPUB rendering (1 = enabled, 0 = disabled)

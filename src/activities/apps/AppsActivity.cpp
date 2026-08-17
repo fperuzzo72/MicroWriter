@@ -7,9 +7,9 @@
 
 #include "AchievementsActivity.h"
 #include "BookmarksAppActivity.h"
+#include "DictionaryActivity.h"
 #include "FavoritesAppActivity.h"
 #include "FlashcardsAppActivity.h"
-#include "WriterActivity.h"
 #include "IfFoundActivity.h"
 #include "ReadingHeatmapActivity.h"
 #include "ReadingProfileActivity.h"
@@ -18,6 +18,7 @@
 #include "SleepAppActivity.h"
 #include "activities/settings/ClockSyncActivity.h"
 #include "SyncDayActivity.h"
+#include "util/OtaApps.h"
 #include "CrossPointSettings.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -193,8 +194,8 @@ void AppsActivity::openSelectedApp() {
     case ShortcutId::Flashcards:
       activity = std::make_unique<FlashcardsAppActivity>(renderer, mappedInput);
       break;
-    case ShortcutId::Write:
-      activity = std::make_unique<WriterActivity>(renderer, mappedInput);
+    case ShortcutId::Dictionary:
+      activity = std::make_unique<DictionaryActivity>(renderer, mappedInput);
       break;
     case ShortcutId::FileTransfer:
       activityManager.goToFileTransfer();
@@ -207,6 +208,9 @@ void AppsActivity::openSelectedApp() {
       break;
     case ShortcutId::OpdsBrowser:
       activityManager.goToBrowser();
+      return;
+    case ShortcutId::MicroSlate:
+      switchToFirstOtaApp();
       return;
   }
 

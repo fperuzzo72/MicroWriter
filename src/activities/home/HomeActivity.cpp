@@ -28,9 +28,9 @@
 #include "RecentBooksStore.h"
 #include "activities/apps/AchievementsActivity.h"
 #include "activities/apps/BookmarksAppActivity.h"
+#include "activities/apps/DictionaryActivity.h"
 #include "activities/apps/FavoritesAppActivity.h"
 #include "activities/apps/FlashcardsAppActivity.h"
-#include "activities/apps/WriterActivity.h"
 #include "activities/apps/IfFoundActivity.h"
 #include "activities/apps/ReadingHeatmapActivity.h"
 #include "activities/apps/ReadingProfileActivity.h"
@@ -43,6 +43,7 @@
 #include "components/themes/lyra/LyraCarouselTheme.h"
 #include "fontIds.h"
 #include "util/HeaderDateUtils.h"
+#include "util/OtaApps.h"
 #include "util/ShortcutRegistry.h"
 #include "util/ShortcutUiMetadata.h"
 
@@ -1027,8 +1028,8 @@ void HomeActivity::loop() {
           startActivityForResult(std::make_unique<FlashcardsAppActivity>(renderer, mappedInput),
                                  [this](const ActivityResult&) { requestFreshHomeRender(true); });
           break;
-        case ShortcutId::Write:
-          startActivityForResult(std::make_unique<WriterActivity>(renderer, mappedInput),
+        case ShortcutId::Dictionary:
+          startActivityForResult(std::make_unique<DictionaryActivity>(renderer, mappedInput),
                                  [this](const ActivityResult&) { requestFreshHomeRender(true); });
           break;
         case ShortcutId::FileTransfer:
@@ -1040,6 +1041,9 @@ void HomeActivity::loop() {
           break;
         case ShortcutId::OpdsBrowser:
           onOpdsBrowserOpen();
+          break;
+        case ShortcutId::MicroSlate:
+          switchToFirstOtaApp();
           break;
       }
     }

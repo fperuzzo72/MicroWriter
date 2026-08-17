@@ -7,11 +7,16 @@ git history for that first attempt and why it was dropped). This file
 preserves the original copyright notices as required by the MIT license on
 each source.
 
+This repo carries the **reader** half of a two-firmware dual-boot bundle.
+The **editor** half (MicroSlate) is built from its own separate repo and
+merged in at the binary level, not copied into this tree — see its own
+license notices in that repo.
+
 ## CPR-vCodex — base firmware (Activity architecture, reading engine,
 ## rendering stack, reading statistics, dictionary, flashcards, KOReader
-## sync, themes)
+## sync, themes, OTA-partition-switch primitive)
 
-Source tree copied from <https://github.com/franssjz/cpr-vcodex>.
+Source tree copied from <https://github.com/franssjz/cpr-vcodex> (`1.5.0.9`).
 
 ```
 MIT License
@@ -42,6 +47,11 @@ CPR-vCodex is itself a personal fork of **CrossPoint Reader**
 maintained by franssjz — MIT licensed, same notice as above (CPR-vCodex's
 own `LICENSE` file carries Dave Allie's original copyright, unchanged by
 the fork, which is standard MIT-fork practice).
+
+`src/network/OtaBootSwitch.h/.cpp` (the low-level otadata-write primitive
+this project's dual-boot switch relies on) ships natively in CPR-vCodex —
+not ported in by this project — and is used here as-is via CPR-vCodex's own
+codebase, under the same license above.
 
 ## open-x4-sdk — low-level display/hardware SDK
 
@@ -75,14 +85,28 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## MicroSlate — writer plugin/integration (planned, not yet ported)
+## OtaApps.h — dual-boot sibling-app name registry/detection/switch (`src/util/OtaApps.h`)
 
-Not in the tree yet. When the writer integration lands, `text_editor.cpp/.h`,
-`ui_renderer.cpp`, `file_manager.cpp`, and `dead_keys.h` will be ported from
-<https://github.com/Josh-writes/microslate-firmware> (used via
-<https://github.com/fperuzzo72/microslate-firmware-US-International>, a
-personal US-International-layout fork). This section will be filled in with
-MicroSlate's MIT license text once that code actually lands.
+The register/detect/switch scheme (not the underlying otadata-write, which
+is CPR-vCodex's own — see above) is ported from **MicroSlate**
+(<https://github.com/Josh-writes/microslate-firmware>, used via the
+US-International fork <https://github.com/fperuzzo72/microslate-firmware-US-International>),
+whose own `src/main.cpp` implements the identical
+`registerOtaAppName`/`detectOtaApps`/`switchToOtaApp` functions. MicroSlate
+itself adapted this from a build-time patch (`scripts/patch-crossink/`)
+that CrossInk (<https://github.com/uxjulia/CrossInk> by uxjulia, MIT,
+copyright Dave Allie — same family as CrossPoint/CPR-vCodex) applies to
+its own `src/activities/home/HomeActivity.cpp` to support dual-booting with
+MicroSlate.
+
+## MicroSlate — the editor half of this dual-boot pair
+
+Built and flashed as its own independent firmware from
+<https://github.com/fperuzzo72/microslate-firmware-US-International> (a
+personal US-International-keyboard-layout fork of
+<https://github.com/Josh-writes/microslate-firmware>) — **not copied into
+this repo's tree**. See that repo's own `LICENSE`/notices for its MIT
+attribution.
 
 ## Previously explored, not used
 
@@ -97,3 +121,11 @@ hands-on before this project settled on CPR-vCodex:
   remains in the current tree.
 - **Papyrix** (<https://github.com/bigbag/papyrix-reader>) — SUMI's own
   base, inspected only for research (never built or copied from directly).
+
+This project also briefly tried a **single integrated firmware** (reader +
+BLE-keyboard writer + WriterActivity in one CPR-vCodex binary, no dual-boot)
+before settling on the dual-boot split above. NimBLE's runtime heap
+footprint made that approach unreliable for reading; see the README and
+git history (commits around "Fix heap starvation" and the base-reset that
+followed) for the full investigation. No code from that attempt remains in
+the current tree.

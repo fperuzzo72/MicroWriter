@@ -640,9 +640,10 @@ bool loadSettingsDirect(CrossPointSettings& s, const JsonDocument& doc, bool* ne
       clamp(doc["flashcardsShortcut"] | s.flashcardsShortcut, shortcutLocationCount, s.flashcardsShortcut);
   s.flashcardsShortcutOrder =
       clamp(doc["flashcardsShortcutOrder"] | s.flashcardsShortcutOrder, shortcutOrderCount, s.flashcardsShortcutOrder);
-  s.writeShortcut = clamp(doc["writeShortcut"] | s.writeShortcut, shortcutLocationCount, s.writeShortcut);
-  s.writeShortcutOrder =
-      clamp(doc["writeShortcutOrder"] | s.writeShortcutOrder, shortcutOrderCount, s.writeShortcutOrder);
+  s.dictionaryShortcut =
+      clamp(doc["dictionaryShortcut"] | s.dictionaryShortcut, shortcutLocationCount, s.dictionaryShortcut);
+  s.dictionaryShortcutOrder =
+      clamp(doc["dictionaryShortcutOrder"] | s.dictionaryShortcutOrder, shortcutOrderCount, s.dictionaryShortcutOrder);
   s.fileTransferShortcut =
       clamp(doc["fileTransferShortcut"] | s.fileTransferShortcut, shortcutLocationCount, s.fileTransferShortcut);
   s.fileTransferShortcutOrder = clamp(doc["fileTransferShortcutOrder"] | s.fileTransferShortcutOrder,
@@ -658,6 +659,10 @@ bool loadSettingsDirect(CrossPointSettings& s, const JsonDocument& doc, bool* ne
       clamp(doc["opdsBrowserShortcut"] | s.opdsBrowserShortcut, shortcutLocationCount, s.opdsBrowserShortcut);
   s.opdsBrowserShortcutOrder = clamp(doc["opdsBrowserShortcutOrder"] | s.opdsBrowserShortcutOrder, shortcutOrderCount,
                                      s.opdsBrowserShortcutOrder);
+  s.microslateShortcut =
+      clamp(doc["microslateShortcut"] | s.microslateShortcut, shortcutLocationCount, s.microslateShortcut);
+  s.microslateShortcutOrder = clamp(doc["microslateShortcutOrder"] | s.microslateShortcutOrder, shortcutOrderCount,
+                                    s.microslateShortcutOrder);
 
   s.browseFilesShortcutVisible = clamp(doc["browseFilesShortcutVisible"] | s.browseFilesShortcutVisible,
                                        static_cast<uint8_t>(2), s.browseFilesShortcutVisible);
@@ -687,8 +692,8 @@ bool loadSettingsDirect(CrossPointSettings& s, const JsonDocument& doc, bool* ne
                                      static_cast<uint8_t>(2), s.favoritesShortcutVisible);
   s.flashcardsShortcutVisible = clamp(doc["flashcardsShortcutVisible"] | s.flashcardsShortcutVisible,
                                       static_cast<uint8_t>(2), s.flashcardsShortcutVisible);
-  s.writeShortcutVisible =
-      clamp(doc["writeShortcutVisible"] | s.writeShortcutVisible, static_cast<uint8_t>(2), s.writeShortcutVisible);
+  s.dictionaryShortcutVisible = clamp(doc["dictionaryShortcutVisible"] | s.dictionaryShortcutVisible,
+                                      static_cast<uint8_t>(2), s.dictionaryShortcutVisible);
   s.fileTransferShortcutVisible = clamp(doc["fileTransferShortcutVisible"] | s.fileTransferShortcutVisible,
                                         static_cast<uint8_t>(2), s.fileTransferShortcutVisible);
   s.screenCleanShortcutVisible = clamp(doc["screenCleanShortcutVisible"] | s.screenCleanShortcutVisible,
@@ -697,6 +702,8 @@ bool loadSettingsDirect(CrossPointSettings& s, const JsonDocument& doc, bool* ne
       clamp(doc["sleepShortcutVisible"] | s.sleepShortcutVisible, static_cast<uint8_t>(2), s.sleepShortcutVisible);
   s.opdsBrowserShortcutVisible = clamp(doc["opdsBrowserShortcutVisible"] | s.opdsBrowserShortcutVisible,
                                        static_cast<uint8_t>(2), s.opdsBrowserShortcutVisible);
+  s.microslateShortcutVisible = clamp(doc["microslateShortcutVisible"] | s.microslateShortcutVisible,
+                                      static_cast<uint8_t>(2), s.microslateShortcutVisible);
 
   migrateLegacyStatsShortcut(s, doc, needsResave);
   normalizeShortcutOrderSettings(s);
@@ -943,8 +950,8 @@ bool JsonSettingsIO::saveSettings(const CrossPointSettings& s, const char* path)
   doc["favoritesShortcutOrder"] = s.favoritesShortcutOrder;
   doc["flashcardsShortcut"] = s.flashcardsShortcut;
   doc["flashcardsShortcutOrder"] = s.flashcardsShortcutOrder;
-  doc["writeShortcut"] = s.writeShortcut;
-  doc["writeShortcutOrder"] = s.writeShortcutOrder;
+  doc["dictionaryShortcut"] = s.dictionaryShortcut;
+  doc["dictionaryShortcutOrder"] = s.dictionaryShortcutOrder;
   doc["fileTransferShortcut"] = s.fileTransferShortcut;
   doc["fileTransferShortcutOrder"] = s.fileTransferShortcutOrder;
   doc["screenCleanShortcut"] = s.screenCleanShortcut;
@@ -953,6 +960,8 @@ bool JsonSettingsIO::saveSettings(const CrossPointSettings& s, const char* path)
   doc["sleepShortcutOrder"] = s.sleepShortcutOrder;
   doc["opdsBrowserShortcut"] = s.opdsBrowserShortcut;
   doc["opdsBrowserShortcutOrder"] = s.opdsBrowserShortcutOrder;
+  doc["microslateShortcut"] = s.microslateShortcut;
+  doc["microslateShortcutOrder"] = s.microslateShortcutOrder;
   doc["browseFilesShortcutVisible"] = s.browseFilesShortcutVisible;
   doc["syncDayShortcutVisible"] = s.syncDayShortcutVisible;
   doc["settingsShortcutVisible"] = s.settingsShortcutVisible;
@@ -966,11 +975,12 @@ bool JsonSettingsIO::saveSettings(const CrossPointSettings& s, const char* path)
   doc["bookmarksShortcutVisible"] = s.bookmarksShortcutVisible;
   doc["favoritesShortcutVisible"] = s.favoritesShortcutVisible;
   doc["flashcardsShortcutVisible"] = s.flashcardsShortcutVisible;
-  doc["writeShortcutVisible"] = s.writeShortcutVisible;
+  doc["dictionaryShortcutVisible"] = s.dictionaryShortcutVisible;
   doc["fileTransferShortcutVisible"] = s.fileTransferShortcutVisible;
   doc["screenCleanShortcutVisible"] = s.screenCleanShortcutVisible;
   doc["sleepShortcutVisible"] = s.sleepShortcutVisible;
   doc["opdsBrowserShortcutVisible"] = s.opdsBrowserShortcutVisible;
+  doc["microslateShortcutVisible"] = s.microslateShortcutVisible;
 
   return saveJsonDocumentToFile("CPS", path, doc);
 }
@@ -1161,9 +1171,6 @@ bool JsonSettingsIO::loadSettings(CrossPointSettings& s, const char* json, bool*
       clamp(doc["flashcardsShortcut"] | s.flashcardsShortcut, shortcutLocationCount, s.flashcardsShortcut);
   s.flashcardsShortcutOrder =
       clamp(doc["flashcardsShortcutOrder"] | s.flashcardsShortcutOrder, shortcutOrderCount, s.flashcardsShortcutOrder);
-  s.writeShortcut = clamp(doc["writeShortcut"] | s.writeShortcut, shortcutLocationCount, s.writeShortcut);
-  s.writeShortcutOrder =
-      clamp(doc["writeShortcutOrder"] | s.writeShortcutOrder, shortcutOrderCount, s.writeShortcutOrder);
   s.fileTransferShortcut =
       clamp(doc["fileTransferShortcut"] | s.fileTransferShortcut, shortcutLocationCount, s.fileTransferShortcut);
   s.fileTransferShortcutOrder = clamp(doc["fileTransferShortcutOrder"] | s.fileTransferShortcutOrder,
@@ -1179,6 +1186,10 @@ bool JsonSettingsIO::loadSettings(CrossPointSettings& s, const char* json, bool*
       clamp(doc["opdsBrowserShortcut"] | s.opdsBrowserShortcut, shortcutLocationCount, s.opdsBrowserShortcut);
   s.opdsBrowserShortcutOrder = clamp(doc["opdsBrowserShortcutOrder"] | s.opdsBrowserShortcutOrder, shortcutOrderCount,
                                      s.opdsBrowserShortcutOrder);
+  s.microslateShortcut =
+      clamp(doc["microslateShortcut"] | s.microslateShortcut, shortcutLocationCount, s.microslateShortcut);
+  s.microslateShortcutOrder = clamp(doc["microslateShortcutOrder"] | s.microslateShortcutOrder, shortcutOrderCount,
+                                    s.microslateShortcutOrder);
 
   s.browseFilesShortcutVisible = clamp(doc["browseFilesShortcutVisible"] | s.browseFilesShortcutVisible,
                                        static_cast<uint8_t>(2), s.browseFilesShortcutVisible);
@@ -1208,8 +1219,6 @@ bool JsonSettingsIO::loadSettings(CrossPointSettings& s, const char* json, bool*
                                      static_cast<uint8_t>(2), s.favoritesShortcutVisible);
   s.flashcardsShortcutVisible = clamp(doc["flashcardsShortcutVisible"] | s.flashcardsShortcutVisible,
                                       static_cast<uint8_t>(2), s.flashcardsShortcutVisible);
-  s.writeShortcutVisible =
-      clamp(doc["writeShortcutVisible"] | s.writeShortcutVisible, static_cast<uint8_t>(2), s.writeShortcutVisible);
   s.fileTransferShortcutVisible = clamp(doc["fileTransferShortcutVisible"] | s.fileTransferShortcutVisible,
                                         static_cast<uint8_t>(2), s.fileTransferShortcutVisible);
   s.screenCleanShortcutVisible = clamp(doc["screenCleanShortcutVisible"] | s.screenCleanShortcutVisible,
@@ -1218,6 +1227,8 @@ bool JsonSettingsIO::loadSettings(CrossPointSettings& s, const char* json, bool*
       clamp(doc["sleepShortcutVisible"] | s.sleepShortcutVisible, static_cast<uint8_t>(2), s.sleepShortcutVisible);
   s.opdsBrowserShortcutVisible = clamp(doc["opdsBrowserShortcutVisible"] | s.opdsBrowserShortcutVisible,
                                        static_cast<uint8_t>(2), s.opdsBrowserShortcutVisible);
+  s.microslateShortcutVisible = clamp(doc["microslateShortcutVisible"] | s.microslateShortcutVisible,
+                                      static_cast<uint8_t>(2), s.microslateShortcutVisible);
 
   normalizeShortcutOrderSettings(s);
   CrossPointSettings::validateFrontButtonMapping(s);
