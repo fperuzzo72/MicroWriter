@@ -15,7 +15,7 @@ Also fixed two bugs found while using this daily — documented here in case the
 
 As I made this modification after Crosspoint 1.4.0 has been released, also modified to include that upgrade on dual boot. That pairing has since moved to a dedicated, actively maintained integration — **[MicroWriter X4](https://github.com/fperuzzo72/MicroWriter)** (paired with CPR-vCodex, not the older CrossPoint 1.4.0) — where this repo is used as the editor half; see that repo's `NOTICE.md` for the current dual-boot credit and mechanism.
 
-**Stable release: MicroWriter 0.1.** This commit is the editor half of the MicroWriter X4 (MicroSlate) / CPR-vCodex pairing, confirmed working together on physical Xteink X4 hardware — the browser file manager (served at `/`), the mDNS/OTA rename to "MicroWriter", and everything from the prior `microwriter-x4-stable` tag.
+**Stable release: MicroWriter 0.2.** This is the editor half of the MicroWriter X4 (MicroSlate) / CPR-vCodex pairing, confirmed working together on physical Xteink X4 hardware. New in 0.2: PgUp/PgDn (and Shift+PgUp/PgDn to select), mode-aware — a real screen-sized jump even in Typewriter mode, where only one line is ever drawn. Everything from 0.1 (browser file manager at `/`, mDNS/OTA rename to "MicroWriter") carries forward unchanged.
 
 Everything else is exactly as it were on MicroSlate 2.0.3 described below. 
 
@@ -125,6 +125,8 @@ When delete is pending, the footer shows `Delete? Enter:Yes  Esc:No`. Press Ente
 | Shift+Arrow keys | Select text (extends from where Shift was first held) |
 | Home / End | Start / end of line |
 | Shift+Home / Shift+End | Select to start / end of line |
+| PgUp / PgDn | Jump one screen up/down (one page, in Pagination mode) |
+| Shift+PgUp / Shift+PgDn | Select one screen up/down |
 | Backspace / Delete | Remove characters (or the selection, if any) |
 | Ctrl+A | Select all |
 | Ctrl+C / Ctrl+X / Ctrl+V | Copy / Cut / Paste |

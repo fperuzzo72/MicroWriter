@@ -244,6 +244,23 @@ static void handleEditorKey(uint8_t keyCode, uint8_t modifiers) {
         if (editorHasSelection()) editorDeleteSelection(); else editorDeleteForward();
         screenDirty = true;
         return;
+      case HID_KEY_PAGE_UP:
+      case HID_KEY_PAGE_DOWN: {
+        // Typewriter mode only ever shows 1 line (editorSetVisibleLines(1)
+        // in ui_renderer.cpp), so a "page" there has to mean something else
+        // — editorGetPageJumpLines() is a real screenful either way.
+        // Pagination mode's own linesPerPage IS editorGetStoredVisibleLines(),
+        // so this doubles as an alias for its existing Ctrl+Left/Right jump.
+        int jump = (writingMode == WritingMode::TYPEWRITER) ? editorGetPageJumpLines()
+                                                              : editorGetStoredVisibleLines();
+        if (jump < 1) jump = 1;
+        for (int i = 0; i < jump; i++) {
+          if (keyCode == HID_KEY_PAGE_UP) editorMoveCursorUp(shift);
+          else editorMoveCursorDown(shift);
+        }
+        screenDirty = true;
+        return;
+      }
     }
   }
 

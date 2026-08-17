@@ -139,6 +139,8 @@ static constexpr uint8_t HID_KEY_DOWN       = 0x51;
 static constexpr uint8_t HID_KEY_UP         = 0x52;
 static constexpr uint8_t HID_KEY_HOME       = 0x4A;
 static constexpr uint8_t HID_KEY_END        = 0x4D;
+static constexpr uint8_t HID_KEY_PAGE_UP    = 0x4B;
+static constexpr uint8_t HID_KEY_PAGE_DOWN  = 0x4E;
 static constexpr uint8_t HID_KEY_CAPSLOCK   = 0x39;
 static constexpr uint8_t HID_KEY_F2         = 0x3B;
 

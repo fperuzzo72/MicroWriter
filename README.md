@@ -5,14 +5,13 @@ an EPUB reader and a Bluetooth-keyboard-driven writer, sharing the same
 16MB flash and switching between each other from a menu entry — no
 reflashing required.
 
-**Stable release: MicroWriter 0.1.** Reader half of the MicroWriter X4
-(MicroSlate) / CPR-vCodex pairing. Confirmed working together on physical
-Xteink X4 hardware — both firmwares register their correct dual-boot menu
-names ("MicroWriter", not "MicroWriter X4" — see `NOTICE.md` for why),
-the self-update guard is in place, and the editor's word-wrap renders
-correctly at every font size and orientation (see the editor half's own
-`README.md` for that, plus its new browser-based file manager).
-Paired editor commit: [microslate-firmware-US-International@51c0631](https://github.com/fperuzzo72/microslate-firmware-US-International/commit/51c0631).
+**Stable release: MicroWriter 0.2.** Both halves now live in this repo —
+reader at the root, editor at `editor/` (see `editor/README.md` for its
+own changelog: PgUp/PgDn, the browser file manager, mDNS/OTA rename to
+"MicroWriter"). Confirmed working together on physical Xteink X4 hardware
+— both firmwares register their correct dual-boot menu names
+("MicroWriter", not "MicroWriter X4" — see `NOTICE.md` for why), and the
+self-update guard is in place.
 
 This project first tried building a single integrated firmware (reader +
 writer + BLE keyboard host in one binary, one input model). Hands-on

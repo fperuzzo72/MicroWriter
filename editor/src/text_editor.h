@@ -59,6 +59,15 @@ void editorSetMaxLineWidthPx(int px);
 void editorSetGlyphWidthFn(int (*fn)(uint32_t codepoint));
 void editorSetVisibleLines(int n);   // Tell editor how many lines are visible on screen
 int editorGetStoredVisibleLines();   // Get the last set visible lines count
+
+// PgUp/PgDn jump size, in lines. Deliberately separate from
+// editorSetVisibleLines(): Typewriter mode forces that to 1 (only one line
+// is ever drawn), which would make a page jump indistinguishable from a
+// single arrow press — exactly the size PgUp/PgDn needs to be usable on a
+// long note. The renderer sets this once per frame from screen geometry,
+// independent of which writing mode is actually active.
+void editorSetPageJumpLines(int n);
+int editorGetPageJumpLines();
 void editorRecalculateLines();
 int editorGetVisibleLines(int lineHeight, int textAreaHeight);
 int editorGetViewportStart();

@@ -453,6 +453,18 @@ void drawTextEditor(GfxRenderer& renderer, HalGPIO& gpio) {
   int totalLines = editorGetLineCount();
   int curLine = editorGetCursorLine();
 
+  // PgUp/PgDn jump size, computed the same way every frame regardless of
+  // writing mode (Normal mode's own header height estimate — matches
+  // Pagination's own tempTextTop below), so it stays a real "screenful"
+  // even in Typewriter mode, where editorSetVisibleLines() below is forced
+  // to 1 (only one line is ever drawn there).
+  {
+    int estTextAreaTop = cleanMode ? 8 : 38;
+    int estVisibleLines = (sh - 5 - estTextAreaTop) / lineHeight;
+    if (estVisibleLines < 1) estVisibleLines = 1;
+    editorSetPageJumpLines(estVisibleLines);
+  }
+
   // --- TYPEWRITER MODE ---
   if (writingMode == WritingMode::TYPEWRITER) {
     // In clean mode (Ctrl+Z): just text on blank screen, no header

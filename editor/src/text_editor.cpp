@@ -22,6 +22,7 @@ static int viewportStartLine = 0;
 static int maxLineWidthPx = 400;      // Wrap budget in pixels — see editorSetMaxLineWidthPx.
 static int (*glyphWidthFn)(uint32_t) = nullptr;  // Per-codepoint pixel width; caller-supplied (font is a renderer concern, not this module's).
 static int storedVisibleLines = 20;  // Updated by renderer each frame
+static int pageJumpLines = 20;       // PgUp/PgDn jump size — see editorSetPageJumpLines
 static bool lineBreaksDirty = true;  // Only recompute line breaks when buffer/maxLineWidthPx changes
 
 // --- Selection & clipboard ---
@@ -458,6 +459,14 @@ void editorSetVisibleLines(int n) {
 
 int editorGetStoredVisibleLines() {
   return storedVisibleLines;
+}
+
+void editorSetPageJumpLines(int n) {
+  if (n > 0) pageJumpLines = n;
+}
+
+int editorGetPageJumpLines() {
+  return pageJumpLines;
 }
 
 int editorGetVisibleLines(int lineHeight, int textAreaHeight) {
