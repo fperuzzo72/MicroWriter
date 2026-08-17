@@ -7,10 +7,12 @@ checkout: the OTA "call to the editor" (`OtaApps.h` +
 CrossPoint's own firmware-update feature from overwriting the editor's OTA
 slot.
 
-**Verified against:** CrossPoint `1.4.1` — all five patches apply and the
+**Verified against:** CrossPoint `1.4.1` — all five patches apply, the
 resulting source greps clean (`otaAppCount`, `detectOtaApps`,
 `switchToOtaApp`, `registerOtaAppName`, `SIBLING_APP_PROTECTED`,
-`destHoldsForeignApp` all present).
+`destHoldsForeignApp` all present), and `pio run -e gh_release` builds
+successfully (remember `git submodule update --init --recursive` first —
+CrossPoint depends on `open-x4-sdk` as a submodule).
 
 `01_create_otaapps_h.py` uses `ota_boot::switchTo()` (from CrossPoint's own
 `src/network/OtaBootSwitch.h`) rather than calling

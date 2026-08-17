@@ -12,12 +12,15 @@ This repo holds:
   [MicroSlate](https://github.com/Josh-writes/microslate-firmware) (via a
   personal [US-International fork](https://github.com/fperuzzo72/microslate-firmware-US-International)).
   **For the full feature list, keybindings, and usage guide, see
-  [MicroSlate's own original README](https://github.com/Josh-writes/microslate-firmware#readme)**
-  — everything there (Bluetooth keyboard support, note management,
-  writing modes, WiFi sync, auto-save, etc.) still applies here unchanged;
-  `editor/README.md` only documents what's *different* from stock
-  MicroSlate. Its own independent firmware, own `platformio.ini`, builds
-  and flashes on its own.
+  [`editor/README.md`](editor/README.md)** — it carries this project's own
+  fixes at the top, followed by the *complete, unedited* original
+  MicroSlate README (Bluetooth keyboard support, note management, writing
+  modes, WiFi sync, auto-save, etc.), preserved here on purpose rather
+  than just linked to the [upstream repo](https://github.com/Josh-writes/microslate-firmware#readme):
+  if MicroSlate changes or drops functionality upstream that this project
+  hasn't picked up, the reference for what's actually running here stays
+  intact regardless. Its own independent firmware, own `platformio.ini`,
+  builds and flashes on its own.
 - **`patches/`** — one subdirectory per supported reader
   ([CrossPoint](https://github.com/crosspoint-reader/crosspoint-reader),
   [CrossInk](https://github.com/uxjulia/CrossInk),
@@ -125,6 +128,12 @@ esptool.py --chip esp32c3 merge_bin \
   0x650000 path/to/editor/firmware.bin
 esptool.py --chip esp32c3 write_flash 0x0 dualboot-full.bin
 ```
+
+Don't want a reader at all — just the writer, standalone, on its own
+device? Run the **"Build MicroWriter Standalone"** workflow from the
+Actions tab (`workflow_dispatch`, no inputs required) — it builds
+`editor/` alone and publishes a ready-to-flash release, no dual-boot, no
+reader pairing.
 
 ## License
 

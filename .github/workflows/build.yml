@@ -1,10 +1,23 @@
-name: Build and Release
+name: Build MicroWriter Standalone
+
+# Builds *only* the editor (editor/) — no reader, no dual-boot pairing. For
+# anyone who just wants the writing firmware on its own device: a plain
+# BLE-keyboard note-taking e-paper gadget, nothing else.
+#
+# workflow_dispatch only, deliberately not tied to a tag-push trigger: this
+# repo's release.yml already reacts to `v*` tags (its own build + a
+# dual-boot merge against whatever CrossPoint build typeslate.com hosts +
+# a push to the typeslate-website repo) — having both fire on the same tag
+# push would race two workflows trying to create/attach to the same
+# release. Run this one on demand instead.
 
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
+    inputs:
+      version_label:
+        description: 'Rótulo de versão pro nome dos arquivos/release (ex: 0.3, ou deixe em branco pro commit curto)'
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -18,6 +31,15 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Resolver rótulo de versão
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.version_label }}" ]; then
+            echo "label=${{ github.event.inputs.version_label }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "label=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          fi
 
       - uses: actions/cache@v4
         with:
@@ -35,25 +57,29 @@ jobs:
         run: pip install platformio
 
       - name: Build firmware
-        run: pio run
+        run: pio run -e xteink_x4
 
       - name: Prepare release files
+        env:
+          LABEL: ${{ steps.version.outputs.label }}
         run: |
           pip install esptool
           BOOT_APP0=$(find ~/.platformio -name "boot_app0.bin" | head -1)
 
           # --- Arquivo 1: slot-only ---
-          # Grava SOMENTE o MicroSlate no slot app1 (0x650000).
-          # Use este para atualizar sem apagar o CrossPoint.
+          # Só o binário do editor, sem bootloader/partições. Grava em
+          # 0x650000 (app1) se já tiver um leitor dual-boot instalado, ou em
+          # 0x10000 (app0) se o editor for o único firmware.
           cp .pio/build/xteink_x4/firmware.bin \
-             microslate-usi-slot-only-${{ github.ref_name }}.bin
+             "microwriter-standalone-slot-only-${LABEL}.bin"
 
           # --- Arquivo 2: merged completo (instalação do zero) ---
-          # Grava bootloader + partições + MicroSlate no slot app0.
-          # Use APENAS em dispositivos sem nada instalado.
+          # Bootloader + partições + editor, tudo no slot app0 (0x0). O
+          # editor é o único firmware — não há dual-boot nem leitor
+          # nenhum neste arquivo.
           esptool.py --chip esp32c3 merge_bin \
             --flash_mode dio --flash_size 16MB \
-            -o microslate-usi-full-${{ github.ref_name }}.bin \
+            -o "microwriter-standalone-full-${LABEL}.bin" \
             0x0     .pio/build/xteink_x4/bootloader.bin \
             0x8000  .pio/build/xteink_x4/partitions.bin \
             0xe000  "$BOOT_APP0" \
@@ -62,31 +88,43 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: microwriter-standalone-${{ steps.version.outputs.label }}
+          name: "MicroWriter Standalone ${{ steps.version.outputs.label }}"
           files: |
-            editor/microslate-usi-slot-only-${{ github.ref_name }}.bin
-            editor/microslate-usi-full-${{ github.ref_name }}.bin
-          generate_release_notes: true
+            editor/microwriter-standalone-slot-only-${{ steps.version.outputs.label }}.bin
+            editor/microwriter-standalone-full-${{ steps.version.outputs.label }}.bin
           body: |
-            ## MicroSlate — US-International keyboard layout
+            ## MicroWriter — standalone (no reader)
+
+            Just the writing firmware — BLE keyboard, note management, WiFi
+            file sync — with no e-reader paired in. For dual-boot pairing
+            with CrossPoint, CrossInk, or CPR-vCodex instead, see the
+            `patches/` scripts and the root `README.md`.
 
             ### Qual arquivo usar?
 
-            | Situação | Arquivo |
-            |---|---|
-            | Já tem CrossPoint + MicroSlate instalados (dual-boot) | `microslate-usi-slot-only-*.bin` → gravar em **0x650000** |
-            | Instalação do zero (sem nada no dispositivo) | `microslate-usi-full-*.bin` → gravar em **0x0** |
+            | Situação | Arquivo | Endereço |
+            |---|---|---|
+            | Instalação do zero — dispositivo só com este firmware | `microwriter-standalone-full-*.bin` | `0x0` |
+            | Já tem um dual-boot instalado, atualizar só o slot do editor | `microwriter-standalone-slot-only-*.bin` | `0x650000` |
 
-            ### Como gravar o slot-only (sem apagar o CrossPoint)
+            ### Como gravar
 
             **Pelo browser** (Chrome/Edge): acesse [esp.huhn.me](https://esp.huhn.me),
-            conecte o X4, adicione o arquivo `slot-only` com endereço `0x650000` e clique em Program.
+            conecte o X4, adicione o arquivo e informe o endereço acima.
 
             **Pelo terminal:**
-            ```
-            esptool.py --chip esp32c3 --port COM5 --baud 460800 write_flash 0x650000 microslate-usi-slot-only-*.bin
+            ```bash
+            # Instalação do zero
+            esptool.py --chip esp32c3 --port COM5 --baud 460800 \
+              write_flash 0x0 microwriter-standalone-full-*.bin
+
+            # Atualizar só o slot do editor (dual-boot já instalado)
+            esptool.py --chip esp32c3 --port COM5 --baud 460800 \
+              write_flash 0x650000 microwriter-standalone-slot-only-*.bin
             ```
 
-            ### Dead keys implementadas
+            ### Dead keys implementadas (layout US-International)
 
             | Tecla | Resultado |
             |---|---|

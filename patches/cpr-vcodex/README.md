@@ -8,10 +8,12 @@ self-update guard that keeps CPR-vCodex's own firmware-update feature
 from overwriting the editor's OTA slot.
 
 **Verified against:** CPR-vCodex `1.5.0.9-cpr-vcodex` — all eight patches
-apply and the resulting source greps clean (`ShortcutId::MicroSlate`,
+apply, the resulting source greps clean (`ShortcutId::MicroSlate`,
 `microslateShortcut`, `switchToFirstOtaApp` in both `AppsActivity.cpp` and
 `HomeActivity.cpp`, `registerOtaAppName`, the `STR_MICROSLATE` i18n key,
-`SIBLING_APP_PROTECTED`, `destHoldsForeignApp` all present).
+`SIBLING_APP_PROTECTED`, `destHoldsForeignApp` all present), and `pio run
+-e default` builds successfully (remember `git submodule update --init
+--recursive` first — CPR-vCodex depends on `open-x4-sdk` as a submodule).
 
 Unlike `patches/crosspoint/` and `patches/crossink/` — which patch a raw
 `switch`/`case` directly in `HomeActivity.cpp` — CPR-vCodex routes every

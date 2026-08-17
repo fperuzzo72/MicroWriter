@@ -23,8 +23,11 @@ built independently and merged at the binary level into one flashable
 dual-boot image (reader at OTA slot `app0`/`0x10000`, editor at
 `app1`/`0x650000`). Verified hands-on on physical Xteink X4 hardware,
 paired with CPR-vCodex, through MicroWriter 0.2. The patch system (0.3)
-has been verified by applying it to real, current upstream checkouts —
-see "What's NOT verified" below.
+has been verified against real, current upstream checkouts of all three
+readers, including a full compile of each — see "What's verified" below.
+Not yet flash-tested on physical hardware with a patch-built reader
+(0.2's hardware verification predates the patch system; CPR-vCodex was
+hand-edited then, not patch-built).
 
 ## How the project got here (chronological)
 
@@ -173,59 +176,68 @@ What changed this session:
   the very first SUMI-based single-integrated-firmware idea from the
   project's actual origin, long superseded).
 
-## What's verified vs. NOT verified for the 0.3 patch system
+## What's verified for the 0.3 patch system
 
-**Verified:** all three patch sets (`patches/crosspoint/`,
-`patches/crossink/`, `patches/cpr-vcodex/`) were run against real, current,
-tagged upstream checkouts —
+**Fully verified now, including a real `pio run` compile of all three
+patched targets** (this was the one open item after the 0.3 session; see
+below for the compile blocker that delayed it and how it resolved).
 
-- CrossPoint `1.4.1` (`~/github/crosspoint-reader`)
+All three patch sets (`patches/crosspoint/`, `patches/crossink/`,
+`patches/cpr-vcodex/`) were run against real, current, tagged upstream
+checkouts, then built end to end:
+
+- CrossPoint `1.4.1` (`~/github/crosspoint-reader`) — `pio run -e
+  gh_release` → **SUCCESS** (5.2MB firmware.bin)
 - CrossInk `v1.3.4` (`~/github/CrossInk` — note: HEAD/`main` is v1.5.0-era
   and `03_patch_home_activity_cpp.py` does *not* apply cleanly there,
   meaning CrossInk's `HomeActivity.cpp` menu-building code changed between
   1.3.4 and main; the other four CrossInk scripts still matched current
-  `main` when checked)
-- CPR-vCodex `1.5.0.9-cpr-vcodex` (`~/github/cpr-vcodex`)
+  `main` when checked) — `pio run -e tiny` → **SUCCESS** (6.35MB
+  firmware.bin)
+- CPR-vCodex `1.5.0.9-cpr-vcodex` (`~/github/cpr-vcodex`) — `pio run -e
+  default` → **SUCCESS** (6.2MB firmware.bin)
 
-Every script applied cleanly and the resulting source greps clean for all
-the expected symbols (`otaAppCount`, `registerOtaAppName`,
+Every patch script applied cleanly and the resulting source greps clean
+for all the expected symbols (`otaAppCount`, `registerOtaAppName`,
 `destHoldsForeignApp`, `SIBLING_APP_PROTECTED`, etc. — see each
 `patches/<target>/README.md` for the exact list). These three repos are
 cloned locally at `~/github/` for exactly this kind of reference/testing;
-they're pristine (unpatched) clones, not modified.
+they're pristine (unpatched) clones, not modified — each build was done
+in a disposable `git worktree` checked out at the target tag, built, and
+removed afterward.
 
-**NOT verified: a full `pio run` compile of any patched checkout.** Every
-attempt hit the same environment-level failure —
-`~/.platformio/platforms/espressif32/builder/penv_setup.py`'s
-`install_python_deps()` calls out to `uv pip install` for a fixed list of
-build-tool dependencies, and that step failed for two independent
-reasons encountered back to back:
-1. `uv` itself wasn't installed in the Python venv being used to drive
-   `pio` (fixed by installing it there).
-2. One of the pinned dependencies is a direct GitHub zip download
-   (`pioarduino/platformio-core` at a fixed tag) that hit a `429 Too Many
-   Requests` from `codeload.github.com` — likely from this session's own
-   heavy GitHub usage (many clones/downloads). Installing the same
-   version from PyPI instead didn't help, since the platform's dependency
-   check appears to always re-fetch URL-pinned specs regardless of what's
-   already installed under that package name.
+**Two local-environment gotchas hit along the way, both fixed, neither a
+patch-correctness issue:**
 
-Separately, CrossInk 1.3.4's `platformio.ini` pins pioarduino
-`platform-espressif32` release `55.03.37`, which `00_pin_stable_pioarduino_platform.py`'s
-own docstring already documents as having a real packaging bug
-(`framework-arduinoespressif32` fails to resolve) — that patch downgrades
-to `55.03.36-1` specifically to work around it. Pristine CPR-vCodex
-1.5.0.9 pins that same buggy `55.03.37` release directly, with no
-equivalent workaround patch yet.
+1. The first build attempts (during the 0.3 session) failed with `Error:
+   Failed to install Python dependencies into penv` from
+   `~/.platformio/platforms/espressif32/builder/penv_setup.py`. Root
+   cause, in order: `uv` wasn't installed in the Python venv driving
+   `pio` (fixed by installing it there), then a `429 Too Many Requests`
+   from `codeload.github.com` fetching a pinned `pioarduino/platformio-core`
+   zip — almost certainly this session's own heavy GitHub usage tripping
+   a rate limit, not a real dependency problem. It cleared on its own
+   after enough time passed; a same-day retry succeeded with no code
+   changes needed. **If this recurs, just wait and retry** — it is not
+   caused by anything in this repo.
+2. `open-x4-sdk` is a git submodule of each reader (not just CPR-vCodex —
+   CrossPoint and CrossInk depend on it too). A plain `git worktree add`
+   doesn't initialize submodules; each build needed a
+   `git submodule update --init --recursive` first. The CI workflows
+   already handle this correctly (`submodules: recursive` on the
+   `actions/checkout` step) — this only bit local worktree testing.
 
-**Next step for whoever picks this up:** retry `pio run` locally once the
-GitHub rate limit clears (probably just needs time), or trust the
-`.github/workflows/build-*.yml` CI runs (`workflow_dispatch`, run them
-from the GitHub Actions tab) — they run in a clean environment without
-this session's accumulated rate-limit exposure, and are the workflows
-these patches are actually meant to be validated by. If CPR-vCodex's own
-build also needs a pioarduino downgrade like CrossInk's, add a
-`00_pin_stable_pioarduino_platform.py`-equivalent to `patches/cpr-vcodex/`.
+CrossInk 1.3.4's `platformio.ini` pins pioarduino `platform-espressif32`
+release `55.03.37`, which `00_pin_stable_pioarduino_platform.py`'s own
+docstring describes as having a real packaging bug
+(`framework-arduinoespressif32` fails to resolve) and downgrades to
+`55.03.36-1` to work around. Pristine CPR-vCodex 1.5.0.9 pins that same
+`55.03.37` release *directly, with no downgrade*, and still built fine —
+so that "packaging bug" may in fact have been this same GitHub rate-limit
+issue misdiagnosed at the time, not a real defect in `55.03.37` itself.
+Left the CrossInk downgrade patch in place regardless (harmless either
+way, and it's what that patch set was verified against) rather than
+remove it on a guess.
 
 ## Ideas raised but not acted on
 
@@ -258,12 +270,21 @@ build also needs a pioarduino downgrade like CrossInk's, add a
   `README.md` per target documenting the verified-against tag and usage.
 - `.github/workflows/build-<target>.yml` — CI: clone reader at a chosen
   tag, apply patches, build both firmwares, merge, publish a release.
-  `build.yml`/`release.yml` are the editor's own standalone
-  build/release, unrelated to dual-boot pairing (the latter also pushes
-  built firmware to an external `typeslate-website` repo using a
-  `WEBSITE_PAT` secret that almost certainly isn't configured on *this*
-  repo — left in place but flagged with a comment in the workflow file;
-  decide whether to keep, remove, or configure it).
+- `.github/workflows/build.yml` — "Build MicroWriter Standalone",
+  `workflow_dispatch` only, builds *just* `editor/` (no reader, no
+  dual-boot) for anyone who wants the writer on its own device. Renamed
+  and cleaned up from what used to be a `v*`-tag-triggered workflow with
+  stale "MicroSlate"-only branding; no longer fires on tag push
+  specifically so it can't race `release.yml` (below) for the same tag.
+- `.github/workflows/release.yml` — a more elaborate pre-existing
+  pipeline (still `v*`-tag-triggered): builds the editor, attempts a
+  dual-boot merge against whatever CrossPoint build typeslate.com hosts
+  (not this repo's own `patches/crosspoint/`), and pushes the result to
+  an external `typeslate-website` repo using a `WEBSITE_PAT` secret that
+  almost certainly isn't configured on *this* repo. Left in place but
+  flagged with a comment in the workflow file — this looks like it
+  belongs to whoever runs typeslate.com's own publishing flow; decide
+  whether to keep, remove, or configure it before relying on it.
 - `NOTICE.md` — third-party attribution, plus the fullest account of *why*
   things are structured this way (patches vs. copied source, naming
   decisions, etc.) — read this alongside this file for the complete

@@ -6,13 +6,15 @@ checkout: the OTA "call to the editor" (`OtaApps.h` +
 CrossInk's own firmware-update feature from overwriting the editor's OTA
 slot.
 
-**Verified against:** CrossInk `v1.3.4` — all five patches apply and the
+**Verified against:** CrossInk `v1.3.4` — all five patches apply, the
 resulting source greps clean (`otaAppCount`, `SIBLING_APP_PROTECTED`,
-`destHoldsForeignApp` all present). Newer CrossInk versions may need the
-text anchors in `03_patch_home_activity_cpp.py` re-checked — that one
-failed against the current `main` branch (v1.5.0-era) when this was last
-tested, meaning `HomeActivity.cpp`'s menu-building code has changed since
-1.3.4. The other four scripts' anchors (OtaApps.h creation,
+`destHoldsForeignApp` all present), and `pio run -e tiny` builds
+successfully (remember `git submodule update --init --recursive` first —
+CrossInk depends on `open-x4-sdk` as a submodule). Newer CrossInk versions
+may need the text anchors in `03_patch_home_activity_cpp.py` re-checked —
+that one failed against the current `main` branch (v1.5.0-era) when this
+was last tested, meaning `HomeActivity.cpp`'s menu-building code has
+changed since 1.3.4. The other four scripts' anchors (OtaApps.h creation,
 `HomeActivity.h`, `main.cpp`, and the self-update guard) still matched
 current `main` at time of writing.
 
