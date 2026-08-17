@@ -32,6 +32,26 @@ bool autoReconnectEnabled = true;
 static unsigned long reconnectDelay = 5000;  // 5s initial — gives keyboard time to release old connection after deep sleep
 static unsigned long lastReconnectAttempt = 0;
 static constexpr unsigned long MAX_RECONNECT_DELAY = 120000;  // Cap at 2min
+// First reconnect after entering the Writer gets a short grace period so the
+// notes-list render (and its SD directory listing) isn't competing with the
+// connect task's 20KB stack allocation for heap at the exact same moment.
+static constexpr unsigned long WRITER_OPEN_RECONNECT_DELAY_MS = 3000;
+
+// NimBLE's own runtime footprint (well beyond what shows up in a static/.bss
+// size analysis — this is allocated by NimBLEDevice::init() itself) is large
+// enough to starve the EPUB reader's heap if left running all the time.
+// BleKeyboard is the *only* consumer of BLE key events in this firmware
+// (see WriterActivity.cpp) so NimBLE is initialized lazily on Writer entry
+// and torn down on Writer exit via bleSetup()/bleShutdown(), instead of once
+// at boot. bleSetup()/bleShutdown() are both idempotent/safe to call
+// repeatedly. bleLoop() is a no-op whenever BLE isn't currently initialized.
+static bool bleInitialized = false;
+// Set when bleShutdown() is called while a connect task is still running --
+// tearing down NimBLE mid-connect-attempt is not safe (the task may be
+// blocked inside a NimBLE host call). bleLoop() finishes the deferred
+// shutdown once the task exits on its own (bounded by CONNECT_TIMEOUT_MS /
+// the security handshake's own 5s timeout).
+static bool bleShutdownRequested = false;
 
 // Multi-keyboard cycling: index of the keyboard to try on the next auto-reconnect attempt
 static int reconnectKeyboardIndex = 0;
@@ -575,7 +595,25 @@ static void restoreBleBackup() {
 
 uint32_t getCurrentPasskey() { return currentPasskey; }
 
+static void performBleShutdown() {
+  autoReconnectEnabled = true;  // reset for the next time bleSetup() runs
+  connectToKeyboard = false;
+  bleState = BLEState::DISCONNECTED;
+  isScanning = false;
+  discoveredDevices.clear();
+  pRemoteService = nullptr;
+  pInputReportChar = nullptr;
+  NimBLEDevice::deinit(true);  // also deletes pClient (owned via NimBLE's m_pClients)
+  pClient = nullptr;
+  prefs.end();
+  bleInitialized = false;
+  bleShutdownRequested = false;
+  LOG_INF("BLE", "Shut down, heap reclaimed");
+}
+
 void bleSetup() {
+  if (bleInitialized) return;  // idempotent — safe to call on every Writer entry
+
   NimBLEDevice::init("MicroWriter");
   // bond=true, MITM=false (we don't require it), SC=false (legacy compat for Logitech etc.)
   NimBLEDevice::setSecurityAuth(true, false, false);
@@ -607,15 +645,36 @@ void bleSetup() {
     keyboardAddress = nvs_loadAddr(lastKb);
     keyboardAddressType = nvs_loadType(lastKb);
     lastReconnectAttempt = millis();
+    reconnectDelay = WRITER_OPEN_RECONNECT_DELAY_MS;
     LOG_INF("BLE", "Will reconnect to: %s (in %lums, %d paired total)", keyboardAddress.c_str(), reconnectDelay,
             pairedCount);
   } else {
     bleState = BLEState::DISCONNECTED;
     LOG_INF("BLE", "No paired keyboards");
   }
+
+  bleInitialized = true;
+}
+
+void bleShutdown() {
+  if (!bleInitialized) return;
+  if (connectTaskHandle != nullptr) {
+    // Connect task still running -- defer, bleLoop() will finish this once it exits.
+    bleShutdownRequested = true;
+    LOG_DBG("BLE", "Shutdown deferred: connect task still running");
+    return;
+  }
+  performBleShutdown();
 }
 
 void bleLoop() {
+  if (!bleInitialized) return;
+
+  if (bleShutdownRequested && connectTaskHandle == nullptr) {
+    performBleShutdown();
+    return;
+  }
+
   if (isScanning && !NimBLEDevice::getScan()->isScanning()) {
     isScanning = false;
     LOG_DBG("BLE", "Scan complete - found %d devices", (int)discoveredDevices.size());

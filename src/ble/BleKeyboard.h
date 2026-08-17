@@ -43,7 +43,16 @@ struct BleDeviceInfo {
 static constexpr int MAX_PAIRED_KEYBOARDS = 4;
 
 // --- Lifecycle ---
+// Lazily initializes NimBLE. Idempotent — safe to call every time the Writer
+// is entered. NimBLE's runtime heap footprint is large enough to starve the
+// EPUB reader if left running full-time, so this is NOT called at boot.
 void bleSetup();
+// Tears down NimBLE and reclaims its heap. Safe to call even if bleSetup()
+// was never called, or repeatedly. If a connect attempt is in flight, the
+// actual teardown is deferred until it finishes (see bleLoop()).
+void bleShutdown();
+// No-op when BLE hasn't been initialized (bleSetup() not called, or already
+// shut down) — safe to call unconditionally from the main loop.
 void bleLoop();
 
 // --- Connection state ---

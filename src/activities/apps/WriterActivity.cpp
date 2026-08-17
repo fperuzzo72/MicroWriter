@@ -24,6 +24,16 @@ constexpr unsigned long AUTO_SAVE_MAX_MS = 120000;   // Hard cap: save every 2mi
 
 void WriterActivity::onEnter() {
   Activity::onEnter();
+  if (!editorInit()) {
+    // OOM allocating the ~20KB text buffer — nothing else to do here.
+    LOG_ERR("WRT", "Cannot open Writer: OOM allocating text buffer");
+    finish();
+    return;
+  }
+  // NimBLE's own heap footprint is too large to leave running while reading —
+  // only initialize it while the Writer (the only BLE key event consumer) is
+  // actually open.
+  bleSetup();
   notesStoreSetup();
   mode = Mode::NotesList;
   selectedIndex = 0;
@@ -34,6 +44,8 @@ void WriterActivity::onExit() {
   if (mode == Mode::Editing && editorHasUnsavedChanges()) {
     saveCurrentNote();
   }
+  editorShutdown();
+  bleShutdown();
   Activity::onExit();
 }
 

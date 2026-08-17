@@ -1,10 +1,17 @@
 #include "TextEditorBuffer.h"
 
+#include <Logging.h>
+
 #include <algorithm>
 #include <cstring>
+#include <new>
 
 // --- Text buffer ---
-static char textBuffer[TEXT_BUFFER_SIZE];
+// Heap-allocated on editorInit()/freed on editorShutdown() rather than static:
+// this ~20KB was previously resident for the whole firmware lifetime even when
+// the Writer was never opened, eating into the shared heap other features
+// (e.g. the JPEG cover-thumbnail decoder) budget against.
+static char* textBuffer = nullptr;
 static size_t textLength = 0;
 static int cursorPosition = 0;
 
@@ -14,7 +21,7 @@ static char currentTitle[MAX_TITLE_LEN] = "Untitled";
 static bool unsavedChanges = false;
 
 // --- Line management ---
-static int linePositions[MAX_LINES];  // Index into textBuffer for start of each line
+static int* linePositions = nullptr;  // Index into textBuffer for start of each line
 static int lineCount = 0;
 static int cursorLine = 0;
 static int cursorCol = 0;
@@ -29,6 +36,7 @@ static void ensureCursorVisible(int visibleLines);
 // The O(textLength) line break loop only runs when the buffer or charsPerLine changed.
 // Cursor line/col is always recomputed (cheap O(cursorLine) with early exit).
 void editorRecalculateLines() {
+  if (!textBuffer || !linePositions) return;
   if (lineBreaksDirty) {
     lineCount = 0;
     linePositions[0] = 0;
@@ -100,7 +108,16 @@ static void ensureCursorVisible(int visibleLines) {
   if (viewportStartLine >= lineCount) viewportStartLine = std::max(0, lineCount - 1);
 }
 
-void editorInit() {
+bool editorInit() {
+  if (!textBuffer) textBuffer = new (std::nothrow) char[TEXT_BUFFER_SIZE];
+  if (!linePositions) linePositions = new (std::nothrow) int[MAX_LINES];
+  if (!textBuffer || !linePositions) {
+    LOG_ERR("WRT", "OOM: text editor buffer (%u bytes)",
+            (unsigned)(TEXT_BUFFER_SIZE + MAX_LINES * sizeof(int)));
+    editorShutdown();
+    return false;
+  }
+
   memset(textBuffer, 0, TEXT_BUFFER_SIZE);
   textLength = 0;
   cursorPosition = 0;
@@ -110,9 +127,22 @@ void editorInit() {
   viewportStartLine = 0;
   lineBreaksDirty = true;
   editorRecalculateLines();
+  return true;
+}
+
+void editorShutdown() {
+  delete[] textBuffer;
+  delete[] linePositions;
+  textBuffer = nullptr;
+  linePositions = nullptr;
+  textLength = 0;
+  cursorPosition = 0;
+  lineCount = 0;
+  lineBreaksDirty = true;
 }
 
 void editorClear() {
+  if (!textBuffer) return;
   memset(textBuffer, 0, TEXT_BUFFER_SIZE);
   textLength = 0;
   cursorPosition = 0;
@@ -123,6 +153,7 @@ void editorClear() {
 }
 
 void editorLoadBuffer(size_t length) {
+  if (!textBuffer) return;
   textLength = length;
   textBuffer[textLength] = '\0';
   cursorPosition = (int)textLength;  // Start at end
@@ -137,6 +168,7 @@ size_t editorGetLength() { return textLength; }
 int editorGetCursorPosition() { return cursorPosition; }
 
 int editorGetWordCount() {
+  if (!textBuffer) return 0;
   int count = 0;
   bool inWord = false;
   for (size_t i = 0; i < textLength; i++) {
@@ -154,6 +186,7 @@ int editorGetWordCount() {
 }
 
 void editorInsertChar(char c) {
+  if (!textBuffer || !linePositions) return;
   if (textLength >= TEXT_BUFFER_SIZE - 1) return;
 
   for (int i = (int)textLength; i > cursorPosition; i--) {
@@ -200,6 +233,7 @@ static int utf8FwdLen(int pos) {
 }
 
 void editorDeleteChar() {
+  if (!textBuffer || !linePositions) return;
   if (cursorPosition <= 0 || textLength == 0) return;
 
   int len = utf8BackLen(cursorPosition);
@@ -219,6 +253,7 @@ void editorDeleteChar() {
 }
 
 void editorDeleteForward() {
+  if (!textBuffer || !linePositions) return;
   if (cursorPosition >= (int)textLength) return;
 
   int len = utf8FwdLen(cursorPosition);
@@ -236,6 +271,7 @@ void editorDeleteForward() {
 }
 
 void editorMoveCursorLeft() {
+  if (!textBuffer || !linePositions) return;
   if (cursorPosition > 0) {
     int len = utf8BackLen(cursorPosition);
     cursorPosition -= len;
@@ -245,6 +281,7 @@ void editorMoveCursorLeft() {
 }
 
 void editorMoveCursorRight() {
+  if (!textBuffer || !linePositions) return;
   if (cursorPosition < (int)textLength) {
     int len = utf8FwdLen(cursorPosition);
     cursorPosition += len;
@@ -254,6 +291,7 @@ void editorMoveCursorRight() {
 }
 
 void editorMoveCursorUp() {
+  if (!textBuffer || !linePositions) return;
   if (cursorLine <= 0) return;
 
   int targetLine = cursorLine - 1;
@@ -268,6 +306,7 @@ void editorMoveCursorUp() {
 }
 
 void editorMoveCursorDown() {
+  if (!textBuffer || !linePositions) return;
   if (cursorLine >= lineCount - 1) return;
 
   int targetLine = cursorLine + 1;
@@ -282,12 +321,14 @@ void editorMoveCursorDown() {
 }
 
 void editorMoveCursorHome() {
+  if (!textBuffer || !linePositions) return;
   cursorPosition = linePositions[cursorLine];
   editorRecalculateLines();
   ensureCursorVisible(storedVisibleLines);
 }
 
 void editorMoveCursorEnd() {
+  if (!textBuffer || !linePositions) return;
   int lineEnd;
   if (cursorLine + 1 < lineCount) {
     lineEnd = linePositions[cursorLine + 1];

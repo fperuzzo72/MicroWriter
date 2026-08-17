@@ -361,9 +361,10 @@ void setup() {
   // Stamp all SdFat creates/syncs with RTC time when available, else last Sync Day.
   TimeUtils::registerSdFatDateTimeCallback();
 
-  // BLE keyboard host — engine only for now (no Settings UI yet). Reads its
-  // paired-device backup from SD, so must come after Storage.begin().
-  bleSetup();
+  // BLE keyboard host: NimBLE's own runtime heap footprint is large enough to
+  // starve the EPUB reader if initialized unconditionally here. bleSetup() is
+  // now called lazily by WriterActivity::onEnter() (and torn down by
+  // bleShutdown() in onExit()) instead — see src/ble/BleKeyboard.h.
 
   HalSystem::checkPanic();
   BootRecovery::initialize();
@@ -554,7 +555,7 @@ void loop() {
   gpio.update();
   halTiltSensor.update(SETTINGS.tiltPageTurn, SETTINGS.orientation, activityManager.isReaderActivity());
 
-  bleLoop();
+  bleLoop();  // no-op unless the Writer has initialized BLE
 #ifdef ENABLE_SERIAL_LOG
   // Phase 1 verification only: no Settings UI or input routing exists yet
   // for the BLE keyboard, so just prove press/release events arrive.

@@ -14,7 +14,12 @@ constexpr int MAX_LINES = 1024;
 constexpr int MAX_TITLE_LEN = 40;
 constexpr int MAX_FILENAME_LEN = 64;
 
-void editorInit();
+// Allocates the text buffer + line-position table on the heap (~20KB total).
+// Returns false on OOM — caller must not use the editor and should bail out.
+bool editorInit();
+// Frees the buffer allocated by editorInit(). Safe to call even if editorInit()
+// was never called or already failed.
+void editorShutdown();
 void editorClear();
 void editorLoadBuffer(size_t length);  // After filling buffer externally, set length + reset cursor
 
