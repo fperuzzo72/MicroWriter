@@ -109,10 +109,17 @@ this repo's tree**. See that repo's own `LICENSE`/notices for its MIT
 attribution.
 
 On-device, this editor registers itself via `registerOtaAppName` as
-"MicroWriter X4" (the name this reader's Home/Apps shortcut shows for it),
-not "MicroSlate" — a display-name choice for the bundle as a whole, not a
-change of attribution. The underlying codebase remains MicroSlate, credited
-above and in that repo's own notices.
+"MicroWriter" (the name this reader's Home/Apps shortcut shows for it, and
+also the mDNS hostname its webserver advertises — see that repo's own
+README.md), not "MicroSlate" — a display-name choice for the bundle as a
+whole, not a change of attribution. The underlying codebase remains
+MicroSlate, credited above and in that repo's own notices.
+
+The "X4" suffix is deliberately dropped from this runtime identifier (it
+still appears in this repo's own name and docs, since this integration is
+X4-specific): the mDNS name and OTA-registered app name are the pieces
+that would need to stay meaningful if this codebase is ever ported to a
+different device, so they're named after the product, not the hardware.
 
 ## Previously explored, not used
 

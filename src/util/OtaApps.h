@@ -103,7 +103,7 @@ inline void switchToOtaApp(int subtype) {
   }
 }
 
-// Convenience for the "MicroWriter X4" shortcut (ShortcutId::MicroSlate —
+// Convenience for the "MicroWriter" shortcut (ShortcutId::MicroSlate —
 // named after the editor's underlying codebase, MicroSlate, not its display
 // name): this firmware only ever has one dual-boot sibling, so just switch
 // to whichever OTA app is detected first (a no-op if the other slot has
