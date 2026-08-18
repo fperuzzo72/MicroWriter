@@ -187,7 +187,7 @@ static void updateScreen() {
 
 void setup() {
   DBG_INIT();
-  DBG_PRINTLN("MicroSlate starting...");
+  DBG_PRINTLN("MicroWriter starting...");
 
   setCpuFrequencyMhz(80);
 
@@ -221,10 +221,14 @@ void setup() {
   inputSetup();
   fileManagerSetup();
 
+  // Migrate the settings/backup dir before anything reads or writes it
+  // (BLE pairing, WiFi credentials, UI prefs below all live under it).
+  ensureSettingsDir();
+
   // Restore UI prefs from SD backup if NVS was wiped by a firmware flash
   if (!uiPrefs.isKey("orient")) {
     static char uiBuf[128];
-    if (sdReadFile("/microslate/ui_prefs.json", uiBuf, sizeof(uiBuf))) {
+    if (sdReadFile("/microwriter/ui_prefs.json", uiBuf, sizeof(uiBuf))) {
       int o  = jsonGetInt(uiBuf, "orient");
       int d  = jsonGetInt(uiBuf, "dark");
       int wm = jsonGetInt(uiBuf, "writeMode");
@@ -275,7 +279,7 @@ void setup() {
   registerOtaAppName("MicroWriter");
   detectOtaApps();
 
-  DBG_PRINTLN("MicroSlate ready.");
+  DBG_PRINTLN("MicroWriter ready.");
 
   // The display needs one FULL_REFRESH after power-on to initialize its analog
   // circuits before FAST_REFRESH will work.
@@ -593,8 +597,8 @@ void renderSleepScreen() {
   int sw = renderer.getScreenWidth();
   int sh = renderer.getScreenHeight();
   
-  // Title: "MicroSlate"
-  const char* title = "MicroSlate";
+  // Title: "MicroWriter"
+  const char* title = "MicroWriter";
   int titleWidth = renderer.getTextAdvanceX(FONT_BODY, title);
   int titleX = (sw - titleWidth) / 2;
   int titleY = sh * 0.35; // 35% down the screen (moved up)
@@ -721,8 +725,8 @@ void loop() {
              "{\"orient\":%d,\"dark\":%d,\"writeMode\":%d,\"fontSize\":%d,\"showWC\":%d}",
              (int)currentOrientation, darkMode ? 1 : 0,
              (int)writingMode, (int)fontSize, showWordCount ? 1 : 0);
-    if (!SdMan.exists("/microslate")) SdMan.mkdir("/microslate");
-    sdWriteFile("/microslate/ui_prefs.json", uiBuf);
+    ensureSettingsDir();
+    sdWriteFile("/microwriter/ui_prefs.json", uiBuf);
   }
 
   // Check for idle timeout (skip while WiFi sync is active)

@@ -2,6 +2,27 @@
 #include <SDCardManager.h>
 #include <cstring>
 
+// --- Settings/backup directory ---------------------------------------
+// Was "/microslate" (named after the underlying codebase this firmware is
+// built on); renamed to "/microwriter" to match the product name.
+static constexpr char SETTINGS_DIR[] = "/microwriter";
+static constexpr char SETTINGS_DIR_LEGACY[] = "/microslate";
+
+// Call once at boot, before anything reads/writes BLE pairing / WiFi
+// credentials / UI prefs. If SETTINGS_DIR already exists, does nothing. If
+// not, and a pre-rename "/microslate" is found, renames it in place —
+// preserving everything already backed up there — instead of starting
+// fresh with an empty directory (which would silently orphan a previous
+// install's saved settings). Otherwise creates SETTINGS_DIR new.
+static inline void ensureSettingsDir() {
+    if (SdMan.exists(SETTINGS_DIR)) return;
+    if (SdMan.exists(SETTINGS_DIR_LEGACY)) {
+        SdMan.rename(SETTINGS_DIR_LEGACY, SETTINGS_DIR);
+        return;
+    }
+    SdMan.mkdir(SETTINGS_DIR);
+}
+
 // Read entire file into buf. Returns false if missing or too large.
 static inline bool sdReadFile(const char* path, char* buf, size_t bufSize) {
     if (!SdMan.exists(path)) return false;

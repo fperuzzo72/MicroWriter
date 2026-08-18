@@ -123,7 +123,7 @@ static void addSyncLogEntry(const char* fmt, const char* filename) {
 // SD card backup for WiFi credentials
 // =========================================================================
 
-static constexpr char WIFI_BACKUP_PATH[] = "/microslate/wifi.json";
+static constexpr char WIFI_BACKUP_PATH[] = "/microwriter/wifi.json";
 
 static void writeWifiBackup() {
     static char buf[512];
@@ -142,7 +142,7 @@ static void writeWifiBackup() {
         jsonAppendStr(buf, sizeof(buf), pass.c_str());  strncat(buf, "\"", sizeof(buf) - strlen(buf) - 1);
     }
     strncat(buf, "}", sizeof(buf) - strlen(buf) - 1);
-    if (!SdMan.exists("/microslate")) SdMan.mkdir("/microslate");
+    ensureSettingsDir();
     sdWriteFile(WIFI_BACKUP_PATH, buf);
 }
 
