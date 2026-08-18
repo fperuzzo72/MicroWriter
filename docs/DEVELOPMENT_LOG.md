@@ -265,6 +265,86 @@ the editor's own embedded version string confirmed the new build
 `dualboot_artifacts/` (slot-only + full image per target) and `artifacts/`
 (standalone editor).
 
+### 7. The *real* sleep/wake culprit: ESP-IDF app rollback, not otadata resets
+
+The `boot_app0.bin`/full-flash explanation above was real but incomplete —
+it explains why a full reflash discards the active slot, but a second
+device kept waking into the reader even after a **slot-only** editor
+update (`otadata` confirmed byte-identical before/after by direct flash
+read). Something was resetting the boot target on a plain sleep/wake
+cycle, with no flash of any kind involved.
+
+Root cause, confirmed by reading the two test devices' otadata directly
+(`ota_state` field, offset 24 of each 32-byte `SelectEntry` — see
+`OtaBootSwitch.h`'s struct — which the earlier investigation hadn't
+inspected, only `ota_seq`/`crc`): `ota_boot::switchTo()` (the shared
+otadata-write primitive both our dual-boot switch *and* each reader's own
+genuine firmware self-update reuse, since `esp_ota_set_boot_partition()`
+fails on this hardware) always writes the newly-selected slot with state
+**`NEW`** — ESP-IDF's own "OTA app rollback" bookkeeping, meant to give a
+freshly-written, unverified firmware image one boot to prove itself
+(via `esp_ota_mark_app_valid_cancel_rollback()`) before the *next* reset
+rolls it back automatically. Neither the editor nor any reader ever calls
+that confirmation function. On hardware where the physically-flashed
+bootloader has this rollback feature enabled, a slot switched into and
+then put to sleep — before anything confirms it — gets silently rolled
+back to the sibling slot on the very next reset, indistinguishable from a
+plain wake.
+
+Bootloader is a shared, rarely-rewritten partition (`0x0`, only touched by
+a full-image flash), so *which* bootloader — and therefore whether this
+protection is even compiled in — depends entirely on which project last
+did a full flash on a given device, not on which reader or editor version
+is currently running. Confirmed hands-on on the two physical test
+devices: the one that never had the bug has a bootloader byte-identical
+(bar a 38-byte version-string/hash difference) to the editor's own
+`bootloader.bin`, which explicitly ships `BOOTLOADER_APP_ROLLBACK_ENABLE`
+disabled — its otadata showed **both** entries stuck at `NEW`, including
+the currently-*active* one, meaning that bootloader was never even
+transitioning the state field, i.e. never enforcing rollback at all. The
+device that exhibited the bug had one entry `VALID` (the reader) and the
+other `ABORTED` (the editor, mid-rollback) — the literal fingerprint of a
+rollback having fired.
+
+**Rejected fix:** calling `esp_ota_mark_app_valid_cancel_rollback()` from
+each app's own `setup()`/entry point (editor and all four reader patch
+sets) — technically works, but treats the symptom in five separate places
+for something that's really one shared mechanism's problem, and was
+flagged as such during review ("parece ser mais algo relativo à estrutura
+do Ota/boot").
+
+**Actual fix:** leave `ota_boot::switchTo()` itself completely untouched
+— it's upstream reader code (`network/OtaBootSwitch.h`/`.cpp`, native to
+each reader, reused rather than duplicated) and its `NEW`-state behavior
+is *correct* for what it was written for, a reader's own genuine
+self-update (`FirmwareFlasher.cpp`'s `flashFromSdPath()` calls the exact
+same function to switch into freshly-downloaded, unverified firmware,
+where rollback protection is exactly the right safety net). Our dual-boot
+switch is a different operation in disguise — it only ever points at an
+*already-flashed, previously-working* sibling slot, never at new code —
+so a new `confirmLastOtaSwitch()` helper, added right next to
+`switchToOtaApp()` in each of the four `patches/<target>/01_create_otaapps_h.py`
+scripts and in `editor/src/main.cpp`'s own `switchToOtaApp()`, re-reads
+the otadata entry `switchTo()` just wrote (identified as whichever of the
+two has the higher `ota_seq`) and flips just its `ota_state` from `NEW` to
+`VALID` (a second erase+rewrite of that one 4KB sector — `ota_state` isn't
+covered by the entry's CRC, but flash bits can only be cleared, not set,
+without an erase, so a same-sector partial write isn't possible; state
+`0`→`2` needs the erase). `flashFromSdPath()`'s own call to `switchTo()`
+is never touched by this, so a genuine reader self-update still gets full
+rollback protection — only our own manual dual-boot switch skips the
+pending-verify window.
+
+All four targets rebuilt clean with this fix. Flashed to the device that
+had shown the bug: CrossPoint `v1.5.0` (with the fix) written slot-only to
+`app0` (`0x10000`) — bootloader and `otadata` both left untouched,
+confirmed byte-identical before/after by direct flash read, same as every
+other slot-only update this session. **Not yet confirmed by an actual
+physical sleep/wake test** — that's the next thing to verify before
+considering this closed. If you're reading this later: check whether that
+test happened and passed before assuming this fix works in practice, not
+just in the otadata bookkeeping.
+
 ## What's verified for the 0.3 patch system
 
 **Fully verified now, including a real `pio run` compile of all three

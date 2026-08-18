@@ -86,6 +86,53 @@ inline int detectOtaApps(OtaAppEntry* apps, int maxApps) {
   return count;
 }
 
+// ota_boot::switchTo() always marks the newly-selected slot's otadata state
+// as "new" (pending verify) — correct for this reader's own genuine
+// firmware self-update (FirmwareFlasher.cpp reuses this same switchTo(),
+// where the bootloader's rollback safety net should apply to fresh,
+// untested code), but wrong for a plain dual-boot switch: we only ever
+// point at an *already-flashed, previously-working* sibling slot, never at
+// new code. Left as "new", the very next reset before the app confirms
+// itself (neither app calls esp_ota_mark_app_valid_cancel_rollback())
+// gets silently rolled back by the bootloader to the other slot — observed
+// as waking from sleep back into the previous app even though the sibling
+// was active when it went to sleep. This finds the entry switchTo() just
+// wrote (highest seq) and flips just its state to valid, leaving
+// switchTo() itself — and so the reader's own self-update path — with full
+// rollback protection intact.
+inline void confirmLastOtaSwitch() {
+  const esp_partition_t* otadata =
+      esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_OTA, nullptr);
+  if (!otadata) return;
+  constexpr size_t kSectorSize = 0x1000;
+  if (otadata->size < 2 * kSectorSize) return;
+
+  ota_boot::SelectEntry slots[2] = {};
+  if (esp_partition_read(otadata, 0, &slots[0], sizeof(ota_boot::SelectEntry)) != ESP_OK ||
+      esp_partition_read(otadata, kSectorSize, &slots[1], sizeof(ota_boot::SelectEntry)) != ESP_OK) {
+    return;
+  }
+
+  int newestIdx = -1;
+  uint32_t newestSeq = 0;
+  for (int i = 0; i < 2; ++i) {
+    if (slots[i].ota_seq == 0xFFFFFFFFu) continue;
+    if (slots[i].crc != ota_boot::computeSeqCrc(slots[i].ota_seq)) continue;
+    if (newestIdx < 0 || slots[i].ota_seq > newestSeq) {
+      newestIdx = i;
+      newestSeq = slots[i].ota_seq;
+    }
+  }
+  if (newestIdx < 0) return;
+
+  constexpr uint32_t kOtaImgValid = 2;  // ESP_OTA_IMG_VALID
+  slots[newestIdx].ota_state = kOtaImgValid;
+
+  const size_t off = static_cast<size_t>(newestIdx) * kSectorSize;
+  if (esp_partition_erase_range(otadata, off, kSectorSize) != ESP_OK) return;
+  esp_partition_write(otadata, off, &slots[newestIdx], sizeof(slots[newestIdx]));
+}
+
 // Switches the boot partition to `subtype` and restarts. Uses
 // ota_boot::switchTo (writes otadata directly) instead of
 // esp_ota_set_boot_partition, which fails on this hardware with a bogus
@@ -95,6 +142,7 @@ inline void switchToOtaApp(int subtype) {
       esp_partition_find_first(ESP_PARTITION_TYPE_APP, static_cast<esp_partition_subtype_t>(subtype), nullptr);
   if (!target) return;
   if (ota_boot::switchTo(target)) {
+    confirmLastOtaSwitch();
     esp_restart();
   }
 }

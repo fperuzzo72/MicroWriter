@@ -122,6 +122,53 @@ static void detectOtaApps() {
   DBG_PRINTF("[OTA] Detected %d additional app(s)\n", otaAppCount);
 }
 
+// ota_boot::switchTo() always marks the newly-selected slot's otadata state
+// as "new" (pending verify) — correct for a genuine firmware self-update
+// (fresh, untested code, where the bootloader's rollback safety net should
+// apply), but wrong for a plain dual-boot switch: we only ever point at an
+// *already-flashed, previously-working* sibling slot, never at new code.
+// Left as "new", the very next reset before the app confirms itself
+// (neither this editor nor the reader calls
+// esp_ota_mark_app_valid_cancel_rollback()) gets silently rolled back by
+// the bootloader to the other slot — observed as waking from sleep back
+// into the reader even though the editor was active when it went to sleep.
+// This finds the entry switchTo() just wrote (highest seq) and flips just
+// its state to valid, leaving switchTo() itself untouched — so a reader's
+// own genuine self-update (which reuses the exact same function) still
+// gets full rollback protection.
+static void confirmLastOtaSwitch() {
+  const esp_partition_t* otadata =
+      esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_OTA, nullptr);
+  if (!otadata) return;
+  constexpr size_t kSectorSize = 0x1000;
+  if (otadata->size < 2 * kSectorSize) return;
+
+  ota_boot::SelectEntry slots[2] = {};
+  if (esp_partition_read(otadata, 0, &slots[0], sizeof(ota_boot::SelectEntry)) != ESP_OK ||
+      esp_partition_read(otadata, kSectorSize, &slots[1], sizeof(ota_boot::SelectEntry)) != ESP_OK) {
+    return;
+  }
+
+  int newestIdx = -1;
+  uint32_t newestSeq = 0;
+  for (int i = 0; i < 2; ++i) {
+    if (slots[i].ota_seq == 0xFFFFFFFFu) continue;
+    if (slots[i].crc != ota_boot::computeSeqCrc(slots[i].ota_seq)) continue;
+    if (newestIdx < 0 || slots[i].ota_seq > newestSeq) {
+      newestIdx = i;
+      newestSeq = slots[i].ota_seq;
+    }
+  }
+  if (newestIdx < 0) return;
+
+  constexpr uint32_t kOtaImgValid = 2;  // ESP_OTA_IMG_VALID
+  slots[newestIdx].ota_state = kOtaImgValid;
+
+  const size_t off = static_cast<size_t>(newestIdx) * kSectorSize;
+  if (esp_partition_erase_range(otadata, off, kSectorSize) != ESP_OK) return;
+  esp_partition_write(otadata, off, &slots[newestIdx], sizeof(slots[newestIdx]));
+}
+
 // Switch to another OTA app by index into otaApps[]. Non-static so input_handler can call it.
 void switchToOtaApp(int index) {
   if (index < 0 || index >= otaAppCount) return;
@@ -142,6 +189,7 @@ void switchToOtaApp(int index) {
     DBG_PRINTF("[OTA] switchTo failed, staying on current app\n");
     return;
   }
+  confirmLastOtaSwitch();
   esp_restart();
 }
 
