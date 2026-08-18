@@ -17,17 +17,21 @@ we do it this way" belongs here too.
 MicroWriter is a BLE-keyboard writing firmware for e-paper devices
 (`editor/`, built on MicroSlate), paired at build time — via patch
 scripts, not a copied/forked source tree — with a reader of the user's
-choice (`patches/crosspoint/`, `patches/crossink/`, `patches/cpr-vcodex/`).
-There is no reader source checked into this repo. The two firmwares are
-built independently and merged at the binary level into one flashable
-dual-boot image (reader at OTA slot `app0`/`0x10000`, editor at
-`app1`/`0x650000`). Verified hands-on on physical Xteink X4 hardware,
-paired with CPR-vCodex, through MicroWriter 0.2. The patch system (0.3)
-has been verified against real, current upstream checkouts of all three
-readers, including a full compile of each — see "What's verified" below.
-Not yet flash-tested on physical hardware with a patch-built reader
+choice (`patches/crosspoint/` for CrossPoint `1.4.1`,
+`patches/crosspoint-1.5.0/` for CrossPoint `v1.5.0`, `patches/crossink/`,
+`patches/cpr-vcodex/`). There is no reader source checked into this repo.
+The two firmwares are built independently and merged at the binary level
+into one flashable dual-boot image (reader at OTA slot `app0`/`0x10000`,
+editor at `app1`/`0x650000`). Verified hands-on on physical Xteink X4
+hardware, paired with CPR-vCodex, through MicroWriter 0.2. The patch
+system (0.3) has been verified against real, current upstream checkouts of
+all four reader targets (three distinct readers, two CrossPoint versions),
+including a full compile of each — see "What's verified" below. The
+editor's own build (with the 0.3 branding fixes) has been flash-verified
+on physical hardware as a slot-only OTA-slot update; the patch-built
+*readers* themselves have not yet been flash-tested on physical hardware
 (0.2's hardware verification predates the patch system; CPR-vCodex was
-hand-edited then, not patch-built).
+hand-edited then, not patch-built) — only CI/local `pio run` compiles.
 
 ## How the project got here (chronological)
 
@@ -176,18 +180,106 @@ What changed this session:
   the very first SUMI-based single-integrated-firmware idea from the
   project's actual origin, long superseded).
 
+### 6. Branding cleanup, SD settings migration, CrossPoint 1.5.0, and the "always wakes to the reader" finding (this session)
+
+**Remaining "MicroSlate" branding leaks fixed** (commit `c0d6977`): the
+Home-screen header (`editor/src/ui_renderer.cpp`'s `drawMainMenu()`), the
+BLE-advertised device name (`NimBLEDevice::init(...)` in
+`editor/src/ble_keyboard.cpp`), the sleep-screen title, and two debug log
+lines all still said "MicroSlate" — renamed to "MicroWriter". The
+attribution comment explaining *why* the codebase itself is credited as
+MicroSlate in `NOTICE.md` was deliberately left alone; only user-visible
+runtime strings changed.
+
+**SD settings folder migrated `/microslate` → `/microwriter`**, with a
+safe rename-in-place fallback rather than a blind rename: a new
+`ensureSettingsDir()` helper (`editor/src/sd_backup.h`) checks for
+`/microwriter` first, then for a pre-migration `/microslate` to rename in
+place (preserving BLE pairing / WiFi credentials / UI prefs already saved
+there), and only creates a fresh empty `/microwriter` if neither exists.
+Wired into `main.cpp`, `ble_keyboard.cpp`, and `wifi_sync.cpp` (all three
+previously had their own hand-rolled "does this dir exist" checks against
+the old path).
+
+**CrossPoint's patch set split by version.** CrossPoint's latest stable is
+`v1.5.0`, not `1.4.1` (what `patches/crosspoint/` was built and verified
+against). `v1.5.0` refactored `HomeActivity::loop()`'s menu-activation
+code — the `switch (indexToMenuItem(...))` that patch 3 anchors on moved
+from being directly nested inside `if (mappedInput.wasReleased(Confirm))`
+into a shared lambda (`activateSelection`, now also called by new
+touch/swipe handlers `v1.5.0` added) — which broke patch 3's anchor
+(patches 1, 2, 4, 5 were unaffected: none of their anchor points moved).
+Rather than replace `patches/crosspoint/`, a new, separate
+`patches/crosspoint-1.5.0/` was created — patch 3 rewritten for the new,
+shallower brace nesting the switch now sits inside (the switch/case logic
+itself is byte-identical to 1.4.1's), patches 1/2/4/5 copied over
+unchanged. `patches/crosspoint/` (1.4.1) is untouched and still verified
+working. See `patches/crosspoint-1.5.0/README.md` for the exact diff.
+Note also: as of `v1.5.0` CrossPoint's SDK submodule was renamed
+`open-x4-sdk` → `freeink-sdk` (`1.4.1` still uses `open-x4-sdk`) — both
+patch sets' own `git submodule update --init --recursive` step handles
+this transparently, but it's a trap if you're diffing checkouts by hand.
+
+**"Always wakes into the reader" tracked down to a flashing-procedure
+issue, not a firmware bug.** One physical device consistently resumed
+whichever firmware (reader or editor) was active before a power-button
+sleep/wake cycle; another, that had received several full-image
+reflashes over time, always came back up on the reader regardless of what
+was active before. Neither the editor's `enterDeepSleep()`
+(`editor/src/main.cpp`) nor CPR-vCodex's own deep-sleep path touch
+`otadata` at all — deep-sleep wake on ESP32 is a full reset through the
+bootloader, which reads `otadata` to pick the boot partition, so as long
+as nothing touches `otadata` during sleep/wake, waking naturally resumes
+whatever was active before. Nothing does, on either firmware — sleep/wake
+itself was never the actual cause.
+
+The real cause: every `*-full.bin` dual-boot image (all four
+`.github/workflows/build-*.yml`) is produced by `esptool merge_bin`
+writing `boot_app0.bin` at `0xe000` — the same offset as the `otadata`
+partition. `boot_app0.bin` is ESP-IDF's stock "initialize otadata to boot
+`ota_0`" blob, so **every full-image reflash silently resets the active
+OTA slot back to the reader**, discarding whatever slot (reader or
+editor) was actually last active. The `*-slot-only.bin` artifacts (item 4
+and 5 in every release) never touch `0x0`-`0x10000`, so they leave
+`otadata` — and therefore "which firmware resumes on next boot/wake" —
+completely alone.
+
+Practical fix, no source change needed: **prefer slot-only updates for
+any device that already has dual-boot provisioned; reserve the
+`*-full.bin` images for first-time setup**, where there's no prior
+`otadata` state worth preserving. Added this guidance to all four
+release-notes bodies (`build-crosspoint.yml`, `build-crosspoint-1.5.0.yml`,
+`build-crossink.yml`, `build-cpr-vcodex.yml`). Confirmed on hardware while
+verifying this: read the connected device's actual on-flash partition
+table via `esptool read_flash` before touching it (matched
+`editor/partitions.csv` exactly), then flashed only `0x650000` (the
+editor's own OTA slot) with the current build — `otadata` was
+byte-for-byte identical before and after (same two sequence numbers), and
+the editor's own embedded version string confirmed the new build
+(`microwriter-0.3-2-gc0d6977`) took.
+
+**All four reader/editor pairings now build clean** — CPR-vCodex
+`1.5.0.9-cpr-vcodex`, CrossInk `v1.3.4`, CrossPoint `1.4.1`, CrossPoint
+`v1.5.0` — each in a disposable `git worktree`, patched, and compiled
+(`pio run`) with today's editor build; artifacts refreshed in
+`dualboot_artifacts/` (slot-only + full image per target) and `artifacts/`
+(standalone editor).
+
 ## What's verified for the 0.3 patch system
 
 **Fully verified now, including a real `pio run` compile of all three
 patched targets** (this was the one open item after the 0.3 session; see
 below for the compile blocker that delayed it and how it resolved).
 
-All three patch sets (`patches/crosspoint/`, `patches/crossink/`,
-`patches/cpr-vcodex/`) were run against real, current, tagged upstream
-checkouts, then built end to end:
+All four patch sets (`patches/crosspoint/`, `patches/crosspoint-1.5.0/`,
+`patches/crossink/`, `patches/cpr-vcodex/`) were run against real,
+current, tagged upstream checkouts, then built end to end:
 
 - CrossPoint `1.4.1` (`~/github/crosspoint-reader`) — `pio run -e
   gh_release` → **SUCCESS** (5.2MB firmware.bin)
+- CrossPoint `v1.5.0` (`~/github/crosspoint-reader`) — `pio run -e
+  gh_release` → **SUCCESS** (5.5MB firmware.bin); SDK submodule is
+  `freeink-sdk` at this tag, not `open-x4-sdk`
 - CrossInk `v1.3.4` (`~/github/CrossInk` — note: HEAD/`main` is v1.5.0-era
   and `03_patch_home_activity_cpp.py` does *not* apply cleanly there,
   meaning CrossInk's `HomeActivity.cpp` menu-building code changed between
@@ -195,7 +287,7 @@ checkouts, then built end to end:
   `main` when checked) — `pio run -e tiny` → **SUCCESS** (6.35MB
   firmware.bin)
 - CPR-vCodex `1.5.0.9-cpr-vcodex` (`~/github/cpr-vcodex`) — `pio run -e
-  default` → **SUCCESS** (6.2MB firmware.bin)
+  gh_release` → **SUCCESS** (6.1MB firmware.bin)
 
 Every patch script applied cleanly and the resulting source greps clean
 for all the expected symbols (`otaAppCount`, `registerOtaAppName`,
@@ -266,10 +358,15 @@ remove it on a guess.
 ## Where things live
 
 - `editor/` — the writer firmware. Independent PlatformIO project.
-- `patches/<crosspoint|crossink|cpr-vcodex>/` — patch scripts + a
-  `README.md` per target documenting the verified-against tag and usage.
+- `patches/<crosspoint|crosspoint-1.5.0|crossink|cpr-vcodex>/` — patch
+  scripts + a `README.md` per target documenting the verified-against tag
+  and usage. CrossPoint has two patch sets (`1.4.1` and `v1.5.0`) because
+  their `HomeActivity.cpp` menu code diverged enough to need different
+  patch-3 anchors — see section 6 above.
 - `.github/workflows/build-<target>.yml` — CI: clone reader at a chosen
   tag, apply patches, build both firmwares, merge, publish a release.
+  `build-crosspoint.yml` targets `1.4.1`-family tags,
+  `build-crosspoint-1.5.0.yml` targets `v1.5.0`-family tags.
 - `.github/workflows/build.yml` — "Build MicroWriter Standalone",
   `workflow_dispatch` only, builds *just* `editor/` (no reader, no
   dual-boot) for anyone who wants the writer on its own device. Renamed

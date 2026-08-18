@@ -1,12 +1,12 @@
-name: Build CrossPoint Dual-Boot
+name: Build CrossPoint 1.5.0 Dual-Boot
 
 on:
   workflow_dispatch:
     inputs:
       crosspoint_tag:
-        description: 'Tag do CrossPoint a compilar (ex: 1.4.1)'
+        description: 'Tag do CrossPoint a compilar (ex: v1.5.0)'
         required: true
-        default: '1.4.1'
+        default: 'v1.5.0'
 
 permissions:
   contents: write
@@ -29,23 +29,24 @@ jobs:
 
       # -----------------------------------------------------------------------
       # Patches — cada script mexe em um arquivo do CrossPoint. Ficam em
-      # patches/crosspoint/ deste repo (não do CrossPoint), mesmo padrão de
-      # patches/crossink/.
+      # patches/crosspoint-1.5.0/ deste repo (não do CrossPoint). Separado de
+      # patches/crosspoint/ (1.4.1) porque o patch 3 mudou de âncora entre as
+      # duas versões — veja patches/crosspoint-1.5.0/README.md.
       # -----------------------------------------------------------------------
       - name: "Patch 1/5 — Criar OtaApps.h"
-        run: python3 patches/crosspoint/01_create_otaapps_h.py
+        run: python3 patches/crosspoint-1.5.0/01_create_otaapps_h.py
 
       - name: "Patch 2/5 — HomeActivity.h"
-        run: python3 patches/crosspoint/02_patch_home_activity_h.py
+        run: python3 patches/crosspoint-1.5.0/02_patch_home_activity_h.py
 
       - name: "Patch 3/5 — HomeActivity.cpp"
-        run: python3 patches/crosspoint/03_patch_home_activity_cpp.py
+        run: python3 patches/crosspoint-1.5.0/03_patch_home_activity_cpp.py
 
       - name: "Patch 4/5 — main.cpp"
-        run: python3 patches/crosspoint/04_patch_main_cpp.py
+        run: python3 patches/crosspoint-1.5.0/04_patch_main_cpp.py
 
       - name: "Patch 5/5 — Proteção do autoupdate (FirmwareFlasher)"
-        run: python3 patches/crosspoint/05_patch_self_update_guard.py
+        run: python3 patches/crosspoint-1.5.0/05_patch_self_update_guard.py
 
       # -----------------------------------------------------------------------
       # Verificação
@@ -87,8 +88,8 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ~/.platformio
-          key: pio-crosspoint-${{ github.event.inputs.crosspoint_tag }}-${{ hashFiles('crosspoint/platformio.ini') }}
-          restore-keys: pio-crosspoint-
+          key: pio-crosspoint150-${{ github.event.inputs.crosspoint_tag }}-${{ hashFiles('crosspoint/platformio.ini') }}
+          restore-keys: pio-crosspoint150-
 
       - name: Compilar CrossPoint com dual-boot
         working-directory: crosspoint
@@ -179,14 +180,18 @@ jobs:
 
             Compilado a partir do CrossPoint oficial
             `${{ github.event.inputs.crosspoint_tag }}` com os patches de dual-boot
-            deste repo (`patches/crosspoint/`) aplicados automaticamente em CI, mais
-            o editor deste repo (`editor/`).
+            deste repo (`patches/crosspoint-1.5.0/`) aplicados automaticamente em CI,
+            mais o editor deste repo (`editor/`).
+
+            Para a `1.4.1`, veja o workflow "Build CrossPoint Dual-Boot"
+            (`patches/crosspoint/`) — as duas versões do CrossPoint têm patch
+            sets separados porque a estrutura do menu mudou entre elas.
 
             No menu principal do CrossPoint aparece uma entrada **MicroWriter**; no
             menu do editor aparece uma entrada **CrossPoint** — cada uma reinicia no
             outro app. O autoupdate de firmware do CrossPoint está protegido contra
             sobrescrever o slot do editor (veja
-            `patches/crosspoint/05_patch_self_update_guard.py`).
+            `patches/crosspoint-1.5.0/05_patch_self_update_guard.py`).
 
             ### Qual arquivo usar?
 

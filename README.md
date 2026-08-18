@@ -110,10 +110,11 @@ IDF_COMPONENT_MANAGER=0 pio run -e xteink_x4
 pio run -e xteink_x4 -t upload
 ```
 
-For a reader, pick one of `patches/crosspoint/`, `patches/crossink/`, or
-`patches/cpr-vcodex/` and follow that directory's own `README.md` — it
-clones the upstream reader at a known-good tag, applies the patch
-scripts, and builds it.
+For a reader, pick one of `patches/crosspoint/` (CrossPoint `1.4.1`),
+`patches/crosspoint-1.5.0/` (CrossPoint `v1.5.0`, current stable),
+`patches/crossink/`, or `patches/cpr-vcodex/` and follow that directory's
+own `README.md` — it clones the upstream reader at a known-good tag,
+applies the patch scripts, and builds it.
 
 To flash a complete dual-boot image from scratch:
 
@@ -127,6 +128,20 @@ esptool.py --chip esp32c3 merge_bin \
   0x10000  path/to/reader/firmware.bin \
   0x650000 path/to/editor/firmware.bin
 esptool.py --chip esp32c3 write_flash 0x0 dualboot-full.bin
+```
+
+**Updating a device that already has dual-boot on it:** don't repeat the
+full-image flash above — it rewrites `boot_app0.bin` at `0xe000`, which
+resets the OTA slot selector (`otadata`, same offset range) back to the
+reader every time, discarding whichever firmware was actually active.
+Write just the one slot that changed instead — reader at `0x10000`,
+editor at `0x650000` — which leaves `otadata` untouched and the device
+keeps booting/waking into whatever was last active:
+
+```bash
+esptool.py --chip esp32c3 write_flash 0x650000 path/to/editor/firmware.bin
+# or, updating the reader instead:
+esptool.py --chip esp32c3 write_flash 0x10000 path/to/reader/firmware.bin
 ```
 
 Don't want a reader at all — just the writer, standalone, on its own

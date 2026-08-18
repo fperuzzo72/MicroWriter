@@ -14,6 +14,13 @@ resulting source greps clean (`otaAppCount`, `detectOtaApps`,
 successfully (remember `git submodule update --init --recursive` first —
 CrossPoint depends on `open-x4-sdk` as a submodule).
 
+CrossPoint's latest stable is now `v1.5.0`, not `1.4.1` — this patch set
+is kept as-is for anyone pinned to `1.4.1`, but new installs should
+prefer `patches/crosspoint-1.5.0/`. `1.5.0` reworked
+`HomeActivity.cpp`'s menu-activation code enough that patch 3 here no
+longer applies to it (see `patches/crosspoint-1.5.0/README.md` for what
+changed).
+
 `01_create_otaapps_h.py` uses `ota_boot::switchTo()` (from CrossPoint's own
 `src/network/OtaBootSwitch.h`) rather than calling
 `esp_ota_set_boot_partition()` directly — the latter fails on X4-class

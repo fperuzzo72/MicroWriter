@@ -211,6 +211,14 @@ jobs:
             | Já tem dual-boot, atualizar só o CPR-vCodex | `cpr-vcodex-*-dualboot-slot-only.bin` | `0x10000` |
             | Já tem dual-boot, atualizar só o editor | `microwriter-editor-dualboot-slot-only.bin` | `0x650000` |
 
+            **Atualizando um dispositivo já provisionado:** prefira sempre os
+            arquivos `*-slot-only.bin` acima. Os arquivos `*-full.bin` regravam
+            bootloader + tabela de partições + `boot_app0.bin`, e este último
+            reinicializa a otadata para sempre apontar para o leitor (`ota_0`) —
+            ou seja, um flash completo descarta qual firmware (leitor ou editor)
+            estava ativo por último. Um flash `slot-only` não toca na otadata,
+            então o dispositivo continua reiniciando no último firmware usado.
+
             ### Como gravar (browser)
 
             Acesse [esp.huhn.me](https://esp.huhn.me) no Chrome/Edge, conecte o X4,
