@@ -682,6 +682,63 @@ engolida. O rótulo do campo também passou a dizer "(.txt is added for you)".
 Conferido fora do aparelho com uma tabela de títulos reais -- acentuados, com
 extensão, com extensão maiúscula, só pontuação, e o caso limite `txt`.
 
+## O botão fantasma: gatilho determinístico e mecanismo
+
+O melhor dado da investigação inteira, e veio de observar o aparelho:
+
+- **Sleep e wake** → o menu abre na **primeira** opção. Sempre.
+- **Entrar pelo CrossPoint e de lá chamar o MicroWriter** → abre na
+  **segunda**, ocasionalmente na terceira. Um ou dois RIGHT fantasmas.
+
+Isso tira o bug do território do "às vezes o cursor anda sozinho" e lhe dá um
+caminho que reproduz.
+
+A diferença entre os dois caminhos é a pista. Os dois re-executam `setup()`,
+então "as primeiras leituras do ADC são ruidosas" não explicaria só um deles.
+O que os separa é que o wake de deep sleep **desliga e religa o domínio
+analógico**, enquanto o `esp_restart()` da troca OTA reinicia o lado digital e
+deixa RTC/analógico em grande parte como o firmware anterior deixou.
+
+### Por que sempre o RIGHT: a tabela de faixas
+
+Olhando enfim o mapeamento (`InputManager::ADC_RANGES_1`) em vez de
+teorizar:
+
+           3100 < leitura <= 4095   -> Back
+           2090 < leitura <= 3100   -> Confirm
+            750 < leitura <= 2090   -> Left
+    -2147483648 < leitura <=  750   -> Right
+
+**RIGHT não é apenas a faixa mais baixa: é a faixa sem piso.** Pega tudo
+abaixo de 750, até INT32_MIN. Uma leitura de 0 — o que um canal de ADC não
+configurado devolve — é classificada como RIGHT com certeza, não por acaso
+estatístico. Isso encerra a pergunta "por que sempre o direito", e explica
+também por que mais debounce piorava: mediar mais amostras dentro de uma
+janela ruim não ajuda quando o destino de toda leitura baixa é o mesmo botão.
+
+### Tentativa 1: ignorar toques até os botões estarem em repouso. Falhou.
+
+Nada era aceito enquanto os botões não tivessem sido vistos em repouso, nem
+nos primeiros 500ms. Testado: **continuou pulando.** Revertida a pedido, para
+não acumular mudanças que não atacam o problema.
+
+Por que era razoável e ainda assim errada: pressupunha que a leitura ruim vem
+*antes* de qualquer leitura boa. Se o ADC estabiliza e só depois oscila, a
+guarda já se declarou satisfeita e deixa passar.
+
+### O próximo passo é medir, não corrigir
+
+O conserto certo é dar um piso ao RIGHT, para que uma leitura degenerada caia
+em "nenhum botão" em vez de num botão. Mas **qual piso** exige um número que
+ninguém tem: um RIGHT legítimo é a menor resistência da escada e pode ler
+genuinamente baixo. Escolher 0, 50 ou 200 sem medir é trocar um palpite por
+outro — e já gastamos uma tentativa assim.
+
+Medir: registrar o `adc1_get_raw` bruto das primeiras dezenas de leituras
+depois de uma entrada vinda do CrossPoint, e comparar com o que um RIGHT de
+verdade produz. Aí o piso é um fato e a correção tem uma linha. Requer build
+de diagnóstico (`-DRELEASE_BUILD` comentado) ou impressão na própria tela.
+
 ### Testar no aparelho
 
 Gravado no slot `app1` (0x650000). O que precisa de confirmação:
@@ -700,10 +757,11 @@ Gravado no slot `app1` (0x650000). O que precisa de confirmação:
 - [ ] Sync: "Save password?" fica na tela até você responder, e responder
       Enter faz a rede ser reconhecida na próxima vez sem perguntar.
 - [ ] Sync: a sessão sobrevive alguns minutos de leitura sem cair.
-- [ ] **O A/B do botão fantasma**, que agora não custa nada: enquanto a tela
-      de Sync está aberta o clock fica fixo em 80MHz sem light sleep. Se os
-      toques espúrios pararem ali e voltarem ao sair, o gerenciamento de
-      energia está confirmado como causa.
+- [~] O A/B do botão fantasma pela tela de Sync: **descartado.** Não há nada
+      visual ali cuja seleção se possa observar andando — o usuário notou
+      isso antes de mim. E o experimento mediria a coisa errada de qualquer
+      forma: DFS durante o uso, não o estado do periférico depois do boot.
+      Substituído pelo gatilho determinístico documentado acima.
 
 ### Two notes for whoever debugs this next
 
