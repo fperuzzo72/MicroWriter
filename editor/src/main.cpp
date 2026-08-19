@@ -373,40 +373,6 @@ static void processPhysicalButtons() {
   bool btnConfirm = gpio.isPressed(HalGPIO::BTN_CONFIRM);
   bool btnBack    = gpio.isPressed(HalGPIO::BTN_BACK);
 
-  // Nothing is accepted until the buttons have been seen at rest, and not in
-  // the first moments after boot at all. A press that was never preceded by a
-  // release is not a press.
-  //
-  // This exists because of a reproducible case, which is worth writing down
-  // because the bug spent a long time looking random: arriving here from
-  // CrossPoint's menu (an OTA switch, so esp_restart) lands on the *second*
-  // menu entry, occasionally the third -- one or two phantom RIGHTs. Waking
-  // from sleep lands on the first, every time.
-  //
-  // That difference is the clue. Both paths re-run setup(), so a plain
-  // "first ADC reads are noisy" story would hit both. What separates them is
-  // that deep-sleep wake powers the analog domain down and back up, while
-  // esp_restart() resets the digital side and leaves RTC/analog largely as
-  // the previous firmware left it. So the first conversions after an OTA
-  // switch are taken through whatever state the reader configured -- and on
-  // this shared resistor ladder RIGHT owns the lowest band, so anything
-  // reading low lands on RIGHT specifically.
-  //
-  // Not presented as a proven root cause: that needs ADC traces nobody has
-  // taken. But the guard is correct whichever way the cause falls, and it
-  // also does the right thing if a button is genuinely held down at boot.
-  // Deliberately *masks* the readings rather than returning early: an early
-  // return would also skip the power button below, and a d-pad line stuck
-  // down would then leave the device with no way to sleep or wake.
-  static bool buttonsSettled = false;
-  if (!buttonsSettled) {
-    const bool anyDown = btnUp || btnDown || btnLeft || btnRight || btnConfirm || btnBack;
-    if (!anyDown && millis() >= 500) buttonsSettled = true;
-    if (!buttonsSettled) {
-      btnUp = btnDown = btnLeft = btnRight = btnConfirm = btnBack = false;
-    }
-  }
-
   // Power button state machine for proper long/short press handling
   static bool powerHeld = false;
   static unsigned long powerPressStart = 0;
