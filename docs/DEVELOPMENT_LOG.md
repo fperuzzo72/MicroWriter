@@ -661,6 +661,25 @@ WiFi and BLE share one radio here and coexistence requires the WiFi side to
 keep sleeping. Nor can BLE be shut down for the duration -- the keyboard is
 BLE and the sync screen needs it.
 
+### Testar no aparelho
+
+Gravado no slot `app1` (0x650000). O que precisa de confirmação:
+
+- [ ] Nomear uma nota com acento — "Ação", "Coração" — produz `acao.txt`,
+      `coracao.txt`. Antes saía `aao.txt`, comendo a letra.
+- [ ] Abrir o editor de título e confirmar **sem mudar nada** deixa o nome
+      igual. Antes virava `nome_2.txt`.
+- [ ] Copiar e colar continuam funcionando (o clipboard agora é alocado na
+      primeira cópia, não mais estático).
+- [ ] Sync: a página carrega inteira, com a lista de arquivos.
+- [ ] Sync: "Save password?" fica na tela até você responder, e responder
+      Enter faz a rede ser reconhecida na próxima vez sem perguntar.
+- [ ] Sync: a sessão sobrevive alguns minutos de leitura sem cair.
+- [ ] **O A/B do botão fantasma**, que agora não custa nada: enquanto a tela
+      de Sync está aberta o clock fica fixo em 80MHz sem light sleep. Se os
+      toques espúrios pararem ali e voltarem ao sair, o gerenciamento de
+      energia está confirmado como causa.
+
 ### Two notes for whoever debugs this next
 
 **`-DRELEASE_BUILD` compiles every `DBG_PRINTF` out.** None of this firmware's
