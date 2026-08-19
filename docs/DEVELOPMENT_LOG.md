@@ -411,6 +411,91 @@ Left the CrossInk downgrade patch in place regardless (harmless either
 way, and it's what that patch set was verified against) rather than
 remove it on a guess.
 
+## Open bug: phantom RIGHT button presses
+
+The d-pad's RIGHT button registers presses nobody made. In a menu this is a
+minor annoyance (the selection jumps a row on its own); in a text or program
+editor it is destructive, because it silently moves the cursor mid-line and
+corrupts what is being typed.
+
+Investigated at length in the sibling MicroBASIC project (see that repo's
+`docs/DEVELOPMENT_LOG.md` for the full trail); recorded here because the cause
+is almost certainly shared -- `editor/` is the same codebase in both, with the
+same `platformio.ini` settings.
+
+### What is established
+
+- Confirmed real and reproducible: a `DBG_PRINTF` at the point where
+  `processPhysicalButtons()` turns a button into a key event shows
+  `btnRight=1` with nobody touching the device.
+- **Not** a keyboard or BLE problem: raw BLE HID reports were logged during
+  reproductions and are always clean. The corruption people first notice
+  ("a space I didn't type") is actually a phantom cursor *move* -- the skipped
+  grid cell reads back as a space.
+- **Not** one unit's wear: reproduces on a second, different X4.
+- **Not** the historical `analogRead()`/dual-framework bug. That one was
+  diagnosed and fixed in `microslate-firmware-US-International` (commit
+  `1d186ae`) and describes exactly this symptom, but the fix is already
+  present here: `InputManager` and `BatteryMonitor` both use the ESP-IDF ADC
+  API directly (`adc1_get_raw`), never `analogRead()`. Verified by grepping
+  the whole `editor/` tree, and by diffing `lib/InputManager/` against the
+  `v2.0.3-usi` tag -- byte-for-byte identical.
+- Present in original MicroSlate too, in reduced form: only at boot when
+  arriving from an OTA switch, never on sleep/wake within the same slot.
+- Absent from CrossPoint, CrossInk and CPR-vCodex.
+
+### Tried and ruled out
+
+- **More debounce.** `InputManager`'s `DEBOUNCE_DELAY` raised from 5ms to
+  30ms: no change. To 120ms: *worse*, going from occasional to near-continuous.
+  Reverted. That result looked backwards for a long time -- see below, it is
+  actually the strongest clue.
+- **Suppressing physical-button reads for 1.5s after a BLE connect.** The
+  first firings clustered around connection setup, which looked like a smoking
+  gun. It kept happening well outside that window. Reverted.
+
+### Current hypothesis: dynamic frequency scaling under the ADC
+
+The buttons are not on individual GPIOs. They are a **resistor ladder on a
+shared ADC pin**, classified by voltage band, and RIGHT sits at the extreme
+bottom of the range -- anything under 750 counts of 4095. Nothing else on the
+ladder is that exposed, so *any* reading biased low classifies as RIGHT.
+
+Comparing this firmware against the readers, which do not show the bug:
+
+| | this firmware | CrossPoint / CPR-vCodex |
+|---|---|---|
+| framework | `arduino, espidf` | `arduino` |
+| power management | `esp_pm_configure()`, 10-80MHz DFS + auto light sleep | none at all |
+
+The readers never call `esp_pm_configure`. `editor/src/main.cpp` enables
+dynamic frequency scaling across an 8x range plus automatic light sleep. The
+ESP32-C3's SAR ADC is timed off the APB clock, so a conversion taken during or
+just after a frequency transition can come out wrong.
+
+This accounts for every observation, including the two that previously made no
+sense:
+
+- Absent on the readers -- they have no DFS.
+- Present across different units -- it is firmware, not hardware.
+- Worse at boot after an OTA switch -- a different clock/PM state path.
+- **Why more debounce made it worse.** Debounce filters brief spikes. These
+  are not spikes; they are systematically wrong conversions during clock
+  transitions, so a longer window integrates more of them instead of
+  rejecting them.
+
+### How to confirm
+
+One edit, in `editor/src/main.cpp`'s `pm_config`: set
+`min_freq_mhz = max_freq_mhz = 80` and `light_sleep_enable = false`, then use
+the device normally. If the phantom presses stop, it is confirmed.
+
+That is a diagnostic, not the fix -- it costs battery life. The proper fix, if
+confirmed, is to hold an `esp_pm_lock` across ADC reads so the frequency
+cannot move under a conversion, leaving DFS enabled everywhere else.
+
+Not run yet.
+
 ## Ideas raised but not acted on
 
 - **Porting to other hardware** (Paper S3, LilyGO T5S3, X4 Pro — user has
