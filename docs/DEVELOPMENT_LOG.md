@@ -690,10 +690,12 @@ Gravado no slot `app1` (0x650000). O que precisa de confirmação:
       `coracao.txt`. Antes saía `aao.txt`, comendo a letra. **Confirmado.**
 - [ ] Digitar "Coração.txt" no campo de título também dá `coracao.txt`, não
       mais `coracaotxt.txt`.
-- [ ] Abrir o editor de título e confirmar **sem mudar nada** deixa o nome
-      igual. Antes virava `nome_2.txt`.
-- [ ] Copiar e colar continuam funcionando (o clipboard agora é alocado na
-      primeira cópia, não mais estático).
+- [x] Abrir o editor de título e confirmar **sem mudar nada** deixa o nome
+      igual. Antes virava `nome_2.txt`. **Confirmado.**
+- [x] Copiar e colar continuam funcionando (o clipboard agora é alocado na
+      primeira cópia, não mais estático). **Confirmado** — e são 16KB a mais
+      de bloco contíguo, que é exatamente o que a task de conexão BLE precisa
+      conseguir alocar de uma vez.
 - [ ] Sync: a página carrega inteira, com a lista de arquivos.
 - [ ] Sync: "Save password?" fica na tela até você responder, e responder
       Enter faz a rede ser reconhecida na próxima vez sem perguntar.
