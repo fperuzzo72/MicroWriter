@@ -570,7 +570,7 @@ void drawRenameScreen(GfxRenderer& renderer, HalGPIO& gpio) {
   drawBattery(renderer, gpio);
   clippedLine(renderer, 5, 32, sw - 5, 32, tc);
 
-  drawClippedText(renderer, FONT_SMALL, 20, 42, "Note title:", 0, tc);
+  drawClippedText(renderer, FONT_SMALL, 20, 42, "Note title (.txt is added for you):", 0, tc);
   int boxY = 64, boxH = 36;
   int textY = boxY + 8;
   renderer.drawRect(15, boxY, sw - 30, boxH, tc);

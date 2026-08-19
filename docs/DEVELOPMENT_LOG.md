@@ -661,12 +661,35 @@ WiFi and BLE share one radio here and coexistence requires the WiFi side to
 keep sleeping. Nor can BLE be shut down for the duration -- the keyboard is
 BLE and the sync screen needs it.
 
+### "Coração.txt" virava coracaotxt.txt
+
+Primeiro teste no aparelho depois do port, e o achado não é um bug antigo --
+é uma armadilha criada hoje. O campo aqui pede um *título*, o ponto não é
+caractere de título, então ele sumia e o `.txt` era acrescentado depois:
+`coracaotxt.txt`.
+
+O que torna isso previsível em vez de excêntrico: o MicroBASIC ganhou nesta
+mesma sessão uma tela quase idêntica onde o campo **é** o nome do arquivo e a
+extensão é escolha do usuário. Quem usa os dois vai digitar a extensão aqui
+por hábito, e estará certo em esperar que funcione.
+
+`titleToFilename()` agora reconhece um `.txt` no fim do título e o descarta
+antes de derivar o nome, então "Coração.txt" e "Coração" dão o mesmo
+`coracao.txt`. Insensível a maiúsculas. A guarda é `len > 4`, de propósito:
+uma nota genuinamente chamada `txt` continua virando `txt.txt` em vez de ser
+engolida. O rótulo do campo também passou a dizer "(.txt is added for you)".
+
+Conferido fora do aparelho com uma tabela de títulos reais -- acentuados, com
+extensão, com extensão maiúscula, só pontuação, e o caso limite `txt`.
+
 ### Testar no aparelho
 
 Gravado no slot `app1` (0x650000). O que precisa de confirmação:
 
-- [ ] Nomear uma nota com acento — "Ação", "Coração" — produz `acao.txt`,
-      `coracao.txt`. Antes saía `aao.txt`, comendo a letra.
+- [x] Nomear uma nota com acento — "Ação", "Coração" — produz `acao.txt`,
+      `coracao.txt`. Antes saía `aao.txt`, comendo a letra. **Confirmado.**
+- [ ] Digitar "Coração.txt" no campo de título também dá `coracao.txt`, não
+      mais `coracaotxt.txt`.
 - [ ] Abrir o editor de título e confirmar **sem mudar nada** deixa o nome
       igual. Antes virava `nome_2.txt`.
 - [ ] Copiar e colar continuam funcionando (o clipboard agora é alocado na

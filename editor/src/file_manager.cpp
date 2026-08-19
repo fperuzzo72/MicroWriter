@@ -49,9 +49,20 @@ static void filenameToTitle(const char* filename, char* out, int maxLen) {
 static void titleToFilename(const char* title, char* out, int maxLen) {
   int maxBase = maxLen - 5; // room for ".txt" + null
   int j = 0;
+
+  // A title ending in ".txt" is someone typing a filename into a field that
+  // asks for a title -- an easy mistake, and a likelier one since MicroBASIC
+  // grew a near-identical screen where the field *is* the filename and the
+  // extension is the user's to choose. Without this, "Coração.txt" loses the
+  // dot (not a legal title character) and gains the extension anyway, landing
+  // as coracaotxt.txt. Recognised and dropped instead.
+  size_t len = strlen(title);
+  if (len > 4 && strcasecmp(title + len - 4, ".txt") == 0) len -= 4;
+
   const unsigned char* u = (const unsigned char*)title;
+  const unsigned char* end = (const unsigned char*)title + len;
   uint32_t cp;
-  while ((cp = utf8NextCodepoint(&u)) != 0 && j < maxBase) {
+  while (u < end && (cp = utf8NextCodepoint(&u)) != 0 && j < maxBase) {
     char c = asciiFold(cp);
     if (c == 0) continue;  // no ASCII stand-in: drop it
     if (c >= 'A' && c <= 'Z') c += 32;
