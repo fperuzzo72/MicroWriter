@@ -626,6 +626,10 @@ static void dispatchEvent(const KeyEvent& event) {
   }
 }
 
+void inputDiscardPendingKeys() {
+  while (!isQueueEmpty()) (void)dequeueKeyEvent();
+}
+
 int processAllInput() {
   int processedCount = 0;
   while (!isQueueEmpty()) {

@@ -1,7 +1,9 @@
 #include "file_manager.h"
 #include "text_editor.h"
+#include "ascii_fold.h"
 #include <Arduino.h>
 #include <SDCardManager.h>
+#include <Utf8.h>
 #include <cstring>
 
 // --- File list ---
@@ -33,11 +35,25 @@ static void filenameToTitle(const char* filename, char* out, int maxLen) {
 
 // Convert a title to a valid FAT filename (lowercase, spaces->underscores,
 // non-alphanumeric stripped, ".txt" appended).
+//
+// Decoded rather than walked byte by byte, because a title is UTF-8: an
+// accented letter is two bytes and neither of them is in a-z0-9, so the old
+// byte loop dropped *both* -- naming a note "Ação" produced "aao.txt". That
+// matters more here than almost anywhere: this is a writing app, and the
+// titles people give notes in Portuguese are full of accents.
+//
+// Folding to plain ASCII loses the accent but keeps the letter, and the
+// filename has to be ASCII regardless -- SdFat rejects any byte with the high
+// bit set in a long file name (see ascii_fold.h). The *title* is untouched
+// and stays UTF-8; only the filename derived from it folds.
 static void titleToFilename(const char* title, char* out, int maxLen) {
   int maxBase = maxLen - 5; // room for ".txt" + null
   int j = 0;
-  for (int i = 0; title[i] != '\0' && j < maxBase; i++) {
-    char c = title[i];
+  const unsigned char* u = (const unsigned char*)title;
+  uint32_t cp;
+  while ((cp = utf8NextCodepoint(&u)) != 0 && j < maxBase) {
+    char c = asciiFold(cp);
+    if (c == 0) continue;  // no ASCII stand-in: drop it
     if (c >= 'A' && c <= 'Z') c += 32;
     if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
       out[j++] = c;
@@ -51,8 +67,13 @@ static void titleToFilename(const char* title, char* out, int maxLen) {
 }
 
 // Derive a unique /notes/ filename from a title, handling collisions with _2, _3 suffix.
-void deriveUniqueFilename(const char* title, char* out, int maxLen) {
+void deriveUniqueFilename(const char* title, char* out, int maxLen, const char* except) {
   titleToFilename(title, out, maxLen);
+
+  // `except` is the file being renamed. Without it, confirming a rename
+  // without actually changing the title collides with the file itself and
+  // bumps it to _2.
+  if (except && strcmp(out, except) == 0) return;
 
   char path[320];
   snprintf(path, sizeof(path), "/notes/%s", out);
@@ -210,7 +231,7 @@ void createNewFile() {
 // Rename a file on disk to match a new title, updating editor state if needed.
 void updateFileTitle(const char* filename, const char* newTitle) {
   char newFilename[MAX_FILENAME_LEN];
-  deriveUniqueFilename(newTitle, newFilename, MAX_FILENAME_LEN);
+  deriveUniqueFilename(newTitle, newFilename, MAX_FILENAME_LEN, filename);
 
   if (strcmp(newFilename, filename) != 0) {
     char oldPath[320], newPath[320];

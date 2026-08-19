@@ -556,3 +556,130 @@ Not run yet.
   of the three supported readers, used to build and verify the patches
   above. Not part of this repo; recreate with a plain `git clone` if
   they're not present on a new machine.
+
+## Fixes brought back from MicroBASIC
+
+MicroBASIC is this firmware plus a BASIC environment -- it started as a plain
+copy of `editor/`, so every file it did not replace is still this one. A long
+session of hardware debugging over there turned up eight bugs that all live in
+shared code, which means they were all live here too. Verified against this
+tree before porting, not assumed.
+
+The direction of travel is worth stating, because it is the opposite of what
+MicroBASIC's README originally said: MicroWriter is not upstream of MicroBASIC
+in any live sense, but MicroBASIC exercises this code harder (more RAM
+pressure, more time on the sync screen) and finds things first. What it finds
+comes back here.
+
+### The file browser lost accented letters
+
+`titleToFilename()` walked the title byte by byte and kept only `a-z0-9`. A
+title is UTF-8, so an accented letter is two bytes and *neither* is in that
+set: naming a note "Ação" produced `aao.txt`. Not a truncation anyone would
+notice as a bug -- it just looks like an odd filename.
+
+This matters more here than in MicroBASIC. This is a writing app, and the
+titles people give notes in Portuguese are full of accents.
+
+The filename has to be ASCII regardless: SdFat rejects any byte with the high
+bit set in a long file name (`lfnLegalChar()`), so a UTF-8 name fails to open
+outright. `ascii_fold.h` folds a codepoint to the nearest plain letter, so
+"Ação" becomes `acao.txt` -- the accent goes, the letter stays. The *title*
+is untouched and stays UTF-8; only the derived filename folds.
+
+### Renaming a note without changing it renamed it anyway
+
+`deriveUniqueFilename()` bumps a name to `_2` when it already exists, and the
+file being renamed always exists. So opening the title editor and confirming
+without changing anything renamed `note.txt` to `note_2.txt`. It now takes an
+`except` argument naming the file that does not count as a collision.
+
+### 16KB of clipboard sitting in .bss
+
+`clipboard` was a static `char[TEXT_BUFFER_SIZE]`. Static `.bss` sits below
+the heap, so that was 16KB permanently removed from the largest contiguous
+block -- on the device whose BLE connect task needs 20KB *in one piece* and
+has already been documented failing to get it. It is allocated on the first
+copy now. A copy that cannot allocate simply does not copy, which is a much
+better failure than a keyboard that will not reconnect.
+
+### "Save password?" answered itself
+
+The prompt is entered when the connection succeeds -- by something finishing,
+not by the user pressing anything. Whatever is in the input queue at that
+moment was typed at a *different* screen: the Enter that submitted the
+password, or a keyboard auto-repeat of it. Enter on this screen means "yes,
+save". So the screen appeared and vanished before it could be read, and the
+password was never saved.
+
+The panel also takes ~700ms to display the question, so any key pressed in
+that window answers something nobody has read -- and this device generates
+spurious button presses (see the phantom RIGHT section), which makes a
+dismissable-before-visible prompt the worst possible shape.
+
+Both prompts now go through `openPrompt()`: discard the queued input on entry,
+ignore keys for 900ms.
+
+Separately, `usedSavedPassword` and `autoConnectAttempted` are statics that
+outlive a sync session and were never reset. Answering "yes" to FORGET_PROMPT
+rescans, which left `usedSavedPassword` true from the auto-connect that had
+just failed -- and the save prompt only appears when it is false.
+
+### The file page could arrive truncated
+
+`server->send(200, "text/html", FILES_PAGE_HTML)` copies the whole ~8KB page
+into a String first: one contiguous allocation, on a device that has been
+observed with 7KB as its largest free block. And even when that succeeds,
+handing the whole body to one `write()` is not safe -- `WiFiClient::write()`
+gives up after a fixed number of retries, and WiFi modem sleep parks the radio
+between DTIM beacons, so a body this size can run out of them partway.
+
+Nothing reports that. The HTML that arrived renders fine and what did not
+arrive is the `<script>` at the end of the file, so the page appears with no
+file list and buttons that do nothing. It goes out one 1440-byte segment at a
+time now, each with its own retry budget.
+
+### The sync screen races power management
+
+This firmware runs automatic light sleep with 10-80MHz DFS. A WiFi scan is a
+timed sequence of channel hops and should not run on a core that may drop to
+10MHz or sleep between them. The clock is pinned at 80MHz with light sleep off
+for as long as the sync screen is open, and handed back afterwards -- after
+`WiFi.mode(WIFI_OFF)`, not before, because releasing it first tore the radio
+down with DFS already back on and did not always finish ("timeout when WiFi
+un-init").
+
+**Do not extend this to `WiFi.setSleep(false)`.** That was tried in MicroBASIC
+and aborts the firmware:
+
+    wifi:Set ps type: 0
+    E wifi:Error! Should enable WiFi modem sleep when both WiFi and
+      Bluetooth are enabled!!!!!!
+    abort() was called at PC 0x420c849b on core 0
+
+WiFi and BLE share one radio here and coexistence requires the WiFi side to
+keep sleeping. Nor can BLE be shut down for the duration -- the keyboard is
+BLE and the sync screen needs it.
+
+### Two notes for whoever debugs this next
+
+**`-DRELEASE_BUILD` compiles every `DBG_PRINTF` out.** None of this firmware's
+own logging reaches the serial port in a normal build. The ESP-IDF log is a
+separate mechanism and is still there, and it is what actually diagnosed the
+WiFi problems above -- one line, `total sleep time: 65986964 us / 76529859
+us`, explained both a slow page and a truncated one. Comment the flag out in
+platformio.ini for a diagnostic build.
+
+**The phantom RIGHT is still RIGHT.** It has been reported as "the menu
+scrolls down on its own", which sounds like a different button and is not: in
+this UI the d-pad's RIGHT moves a selection *down* and LEFT moves it *up*.
+That strengthens the ADC hypothesis rather than complicating it -- RIGHT sits
+in the lowest band of the shared resistor ladder, so a reading biased low
+lands there specifically, which is what a conversion sampled across a DFS
+frequency transition would produce. It is also why more debounce made it
+worse: debounce averages more samples into a window where the clock is moving.
+
+And there is now a free A/B for it, costing nothing to run: **the sync screen
+already pins the clock at 80MHz with light sleep off.** If the spurious
+presses stop while that screen is open and resume on leaving it, the power
+management is confirmed as the cause without writing a line of code.

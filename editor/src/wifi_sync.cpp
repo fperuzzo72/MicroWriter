@@ -2,6 +2,7 @@
 #include "config.h"
 #include "file_manager.h"
 #include "sd_backup.h"
+#include "input_handler.h"
 #include "web_files_page.h"
 
 #include <Arduino.h>
@@ -10,6 +11,8 @@
 #include <ESPmDNS.h>
 #include <SDCardManager.h>
 #include <Preferences.h>
+#include <esp_pm.h>
+#include <esp_heap_caps.h>
 
 // --- Internal state ---
 static WebServer* server = nullptr;
@@ -73,7 +76,10 @@ static int syncLogCount = 0;
 static bool pcConnected = false;
 
 static unsigned long lastHttpActivityMs = 0;
-static constexpr unsigned long SYNC_TIMEOUT_MS = 60000;  // 60s no HTTP → auto-disconnect
+// Idle timeout, counted from the last HTTP request. Browsing a file list is
+// mostly reading, and 60s was short enough to drop the connection while the
+// user was still deciding what to download.
+static constexpr unsigned long SYNC_TIMEOUT_MS = 300000;  // 5 min no HTTP
 static bool syncCompletePending = false;  // Set by handler, acted on in wifiSyncLoop
 
 // --- DONE state ---
@@ -270,11 +276,60 @@ static void forgetCredential(const char* ssid) {
 // WiFi scanning
 // =========================================================================
 
+// Automatic light sleep and 10-80MHz DFS are on for the whole firmware (see
+// main.cpp), and a scan is a timed sequence of channel hops -- the wrong thing
+// to run on a core that may drop to 10MHz or sleep between them. Pinned for as
+// long as the sync screen is open, handed back on the way out.
+//
+// Do NOT extend this to WiFi.setSleep(false). WiFi's own modem sleep is
+// separate, and turning it off while Bluetooth is enabled aborts the firmware:
+// "Should enable WiFi modem sleep when both WiFi and Bluetooth are enabled".
+// The two share one radio and coexistence requires it.
+static bool pmPinned = false;
+
+static void pinClockForRadio(bool pin) {
+  if (pin == pmPinned) return;
+  esp_pm_config_esp32c3_t cfg = {
+    .max_freq_mhz = 80,
+    .min_freq_mhz = pin ? 80 : 10,
+    .light_sleep_enable = !pin,
+  };
+  if (esp_pm_configure(&cfg) == ESP_OK) pmPinned = pin;
+}
+
+// The two states that put a *question* on screen. Both are entered by
+// something finishing rather than by the user pressing anything, and both
+// answered themselves: the Enter that submitted the password was still in the
+// queue when "Save password?" appeared, and Enter here means yes. The panel
+// also takes ~700ms to show the question, so a key pressed before then
+// answers something nobody has read.
+static unsigned long promptOpenedMs = 0;
+static constexpr unsigned long PROMPT_GUARD_MS = 900;
+
+static void openPrompt(SyncState st) {
+  inputDiscardPendingKeys();
+  promptOpenedMs = millis();
+  syncState = st;
+  screenDirty = true;
+}
+
+static bool promptStillSettling() {
+  return millis() - promptOpenedMs < PROMPT_GUARD_MS;
+}
+
 static void beginScan() {
   syncState = SyncState::SCANNING;
   strcpy(statusText, "Scanning...");
   networkCount = 0;
   selectedNet = 0;
+  // Statics that outlive a sync session. Answering "yes" to FORGET_PROMPT
+  // rescans, which used to leave usedSavedPassword true from the auto-connect
+  // that had just failed -- and pollConnection() only offers to save when it
+  // is false.
+  usedSavedPassword = false;
+  autoConnectAttempted = false;
+
+  pinClockForRadio(true);
   WiFi.mode(WIFI_STA);
   WiFi.disconnect(true);
   WiFi.scanNetworks(true);  // async scan
@@ -400,6 +455,10 @@ static void enterDoneState() {
   stopHttpServer();
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
+  // Only now hand the clock back: releasing it first tore the radio down with
+  // 10MHz DFS and light sleep already re-enabled, and the teardown did not
+  // always finish ("timeout when WiFi un-init").
+  pinClockForRadio(false);
 
   syncState = SyncState::DONE;
   doneStartMs = millis();
@@ -418,7 +477,7 @@ static void pollConnection() {
   if (WiFi.status() == WL_CONNECTED) {
     // If we used a manually entered password, prompt to save first
     if (!usedSavedPassword) {
-      syncState = SyncState::SAVE_PROMPT;
+      openPrompt(SyncState::SAVE_PROMPT);
       snprintf(statusText, sizeof(statusText), "%s",
                WiFi.localIP().toString().c_str());
       screenDirty = true;
@@ -433,7 +492,7 @@ static void pollConnection() {
     strcpy(statusText, "Connection failed");
 
     if (usedSavedPassword) {
-      syncState = SyncState::FORGET_PROMPT;
+      openPrompt(SyncState::FORGET_PROMPT);
     } else {
       syncState = SyncState::CONNECT_FAILED;
     }
@@ -534,7 +593,21 @@ static void handleSyncComplete() {
 
 static void handleFilesPage() {
   lastHttpActivityMs = millis();
-  server->send(200, "text/html", FILES_PAGE_HTML);
+  // Not send() with the page as a String: that copies ~8KB into one
+  // contiguous allocation. And not one write() of the whole thing either --
+  // WiFiClient::write() gives up after a fixed number of retries, and with
+  // WiFi modem sleep parking the radio between DTIM beacons a body this size
+  // can run out of them partway. That is not an error anyone sees; it is a
+  // page that renders with its trailing <script> missing. One TCP segment at
+  // a time gives each chunk its own retry budget.
+  const size_t len = strlen(FILES_PAGE_HTML);
+  server->setContentLength(len);
+  server->send(200, "text/html", "");
+  constexpr size_t CHUNK = 1440;
+  for (size_t off = 0; off < len; off += CHUNK) {
+    const size_t n = (len - off < CHUNK) ? (len - off) : CHUNK;
+    server->sendContent_P(FILES_PAGE_HTML + off, n);
+  }
 }
 
 // The file manager now lives at "/" (see startHttpServer) — redirect anyone
@@ -778,6 +851,7 @@ void syncHandleKey(uint8_t keyCode, uint8_t modifiers) {
       break;
 
     case SyncState::SAVE_PROMPT:
+      if (promptStillSettling()) break;
       // Up = Yes (save), Down = No (skip)
       if (keyCode == HID_KEY_UP || keyCode == HID_KEY_ENTER) {
         saveCredential(connectingSSID, passwordBuf);
@@ -789,6 +863,7 @@ void syncHandleKey(uint8_t keyCode, uint8_t modifiers) {
       break;
 
     case SyncState::FORGET_PROMPT:
+      if (promptStillSettling()) break;
       // Up = Yes (forget), Down = No (keep)
       if (keyCode == HID_KEY_UP || keyCode == HID_KEY_ENTER) {
         forgetCredential(connectingSSID);

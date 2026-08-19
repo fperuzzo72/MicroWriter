@@ -27,7 +27,13 @@ static bool lineBreaksDirty = true;  // Only recompute line breaks when buffer/m
 
 // --- Selection & clipboard ---
 static int selectionAnchor = -1;      // -1 = no selection; else the fixed end, cursorPosition is the live end
-static char clipboard[TEXT_BUFFER_SIZE];
+// Allocated on the first copy rather than reserved statically. 16KB of .bss
+// sits below the heap, so as a static array it was 16KB permanently removed
+// from the largest contiguous block -- on a device where the BLE connect task
+// needs 20KB in one piece and has already failed to get it (see
+// docs/DEVELOPMENT_LOG.md). A copy that cannot allocate simply does not copy,
+// which is a far better failure than a keyboard that will not reconnect.
+static char* clipboard = nullptr;
 static size_t clipboardLen = 0;
 
 // Forward declaration
@@ -407,6 +413,10 @@ void editorCopySelection() {
   if (!editorHasSelection()) return;
   int start = editorGetSelectionStart();
   size_t len = (size_t)(editorGetSelectionEnd() - start);
+  if (!clipboard) {
+    clipboard = (char*)malloc(TEXT_BUFFER_SIZE);
+    if (!clipboard) return;  // nothing copied; the selection is untouched
+  }
   memcpy(clipboard, textBuffer + start, len);
   clipboard[len] = '\0';
   clipboardLen = len;
@@ -423,7 +433,7 @@ bool editorHasClipboardContent() { return clipboardLen > 0; }
 // time, fine for the 1-4 bytes a dead key composes, but would be
 // O(pastedBytes * textLength) for a multi-line paste).
 void editorPasteAtCursor() {
-  if (clipboardLen == 0) return;
+  if (clipboardLen == 0 || !clipboard) return;
   size_t len = clipboardLen;
   if (textLength + len >= TEXT_BUFFER_SIZE) len = TEXT_BUFFER_SIZE - 1 - textLength;
   if (len == 0) return;
