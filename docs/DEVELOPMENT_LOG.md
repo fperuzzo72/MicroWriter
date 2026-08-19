@@ -718,26 +718,65 @@ janela ruim não ajuda quando o destino de toda leitura baixa é o mesmo botão.
 
 ### Tentativa 1: ignorar toques até os botões estarem em repouso. Falhou.
 
-Nada era aceito enquanto os botões não tivessem sido vistos em repouso, nem
-nos primeiros 500ms. Testado: **continuou pulando.** Revertida a pedido, para
-não acumular mudanças que não atacam o problema.
+Testada no aparelho: continuou pulando. Revertida na hora, a pedido, para não
+acumular mudanças que não atacam o problema.
 
-Por que era razoável e ainda assim errada: pressupunha que a leitura ruim vem
-*antes* de qualquer leitura boa. Se o ADC estabiliza e só depois oscila, a
-guarda já se declarou satisfeita e deixa passar.
+A medição depois explicou por quê, e o motivo é instrutivo: a guarda olhava
+`isPressed()`, que devolve o estado **já debounced**. Nas duas primeiras
+amostras o valor cru era 0/RIGHT, mas o debounce ainda não tinha fechado —
+então a guarda via "nada pressionado" e se declarava satisfeita **durante a
+própria falha que devia pular**. Ideia certa, sinal errado.
 
-### O próximo passo é medir, não corrigir
+### A medição
 
-O conserto certo é dar um piso ao RIGHT, para que uma leitura degenerada caia
-em "nenhum botão" em vez de num botão. Mas **qual piso** exige um número que
-ninguém tem: um RIGHT legítimo é a menor resistência da escada e pode ler
-genuinamente baixo. Escolher 0, 50 ou 200 sem medir é trocar um palpite por
-outro — e já gastamos uma tentativa assim.
+Build temporária com três capturas: uma rajada antes de `gpio.begin()`, outra
+depois, e as primeiras leituras reais do laço. Mostradas na tela do menu, que
+é a primeira coisa que aparece depois de uma troca OTA.
 
-Medir: registrar o `adc1_get_raw` bruto das primeiras dezenas de leituras
-depois de uma entrada vinda do CrossPoint, e comparar com o que um RIGHT de
-verdade produz. Aí o piso é um fato e a correção tem uma linha. Requer build
-de diagnóstico (`-DRELEASE_BUILD` comentado) ou impressão na própria tela.
+Uma leitura errada de minha parte no meio do caminho, corrigida pelo usuário e
+que vale registrar: interpretei como "vindo do CrossPoint" números que eram
+de um reset pós-flash, e com isso descartei a hipótese certa. Refeito no
+caminho real:
+
+    PRE 0 4095 4095 4095 ...        <- primeira conversao apos a troca OTA
+    POS 4095 4095 ...               <- depois da nossa configuracao
+    4635ms a=0    b=4095 -> Right   <- ninguem tocou no aparelho
+    4765ms a=0    b=4095 -> Right   <- idem
+    4775ms a=4095 ...  limpo daqui em diante
+    5481ms a=0    b=4095 -> Right   <- agora sim, RIGHT apertado de verdade
+    5874ms a=0    b=4095 -> Right
+
+Dois fatos, e o segundo derrubou a correção planejada.
+
+**Um:** as duas primeiras amostras do laço devolvem `0` cravado, nos dois
+caminhos de reset, sem ninguém encostar. Idêntico em duas capturas, nos
+mesmos ~4635 e ~4765ms. `0` cai na faixa do RIGHT, que não tem piso.
+
+**Dois:** um RIGHT *legítimo* também lê `0`. O plano era dar um piso à faixa
+para que uma leitura degenerada caísse em "nenhum botão" — isso teria
+simplesmente desligado o botão direito. O RIGHT é a menor resistência da
+escada e lê no fundo dela de verdade.
+
+Ou seja: **o discriminador tem de ser _quando_, não _o quê_.** Nenhuma regra
+sobre o valor separa o fantasma do toque real, porque são o mesmo número.
+
+### A correção
+
+Em `InputManager::update()`, sobre o estado **cru**, antes do debounce: nada é
+reportado enquanto a leitura não disser "nada pressionado" ao menos uma vez.
+Um botão que nunca foi visto solto não pode ter sido apertado.
+
+Custa, para quem estiver genuinamente segurando uma tecla no boot, ter de
+soltá-la uma vez — que é o comportamento correto de qualquer forma.
+
+Confirmado no aparelho: entrando pelo CrossPoint o menu abre na primeira
+linha, e RIGHT, LEFT, ENTER e BACK seguem funcionando. A instrumentação foi
+removida e o `-DRELEASE_BUILD` religado.
+
+Não sabemos *por que* as duas primeiras conversões saem zeradas — isso
+continua em aberto e exigiria instrumentar o próprio driver de ADC. Mas a
+guarda não depende da resposta: ela rejeita um toque que nunca foi precedido
+de uma soltura, o que está certo qualquer que seja a causa.
 
 ### Testar no aparelho
 

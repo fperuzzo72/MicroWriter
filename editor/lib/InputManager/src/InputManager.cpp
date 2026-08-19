@@ -20,7 +20,8 @@ const int InputManager::ADC_RANGES_2[] = {ADC_NO_BUTTON, 1120, INT32_MIN};
 const char* InputManager::BUTTON_NAMES[] = {"Back", "Confirm", "Left", "Right", "Up", "Down", "Power"};
 
 InputManager::InputManager()
-    : currentState(0),
+    : settled(false),
+      currentState(0),
       lastState(0),
       pressedEvents(0),
       releasedEvents(0),
@@ -66,7 +67,6 @@ uint8_t InputManager::getState() {
   if (button2 >= 0) {
     state |= (1 << (button2 + 4));
   }
-
   // Read power button (digital, active LOW)
   if (digitalRead(POWER_BUTTON_PIN) == LOW) {
     state |= (1 << BTN_POWER);
@@ -82,6 +82,15 @@ void InputManager::update() {
   // Always clear events first
   pressedEvents = 0;
   releasedEvents = 0;
+
+  // See `settled` in the header. Until the raw reading has once said "nothing
+  // pressed", report nothing: a button that was never seen released cannot
+  // have been pressed. Costs a released-then-pressed at boot for anyone
+  // genuinely holding a key down, which is the correct behaviour anyway.
+  if (!settled) {
+    if (state != 0) return;
+    settled = true;
+  }
 
   // Debounce
   if (state != lastState) {
