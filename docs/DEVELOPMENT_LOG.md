@@ -682,14 +682,59 @@ engolida. O rótulo do campo também passou a dizer "(.txt is added for you)".
 Conferido fora do aparelho com uma tabela de títulos reais -- acentuados, com
 extensão, com extensão maiúscula, só pontuação, e o caso limite `txt`.
 
+## O botão fantasma tem um gatilho determinístico
+
+O melhor dado da investigação inteira, e veio de uma observação no aparelho,
+não de leitura de código:
+
+- **Sleep e wake** → o menu abre na **primeira** opção. Sempre.
+- **Entrar pelo CrossPoint e de lá chamar o MicroWriter** → abre na
+  **segunda**, ocasionalmente na terceira. Um ou dois RIGHT fantasmas.
+
+Isso muda a natureza do problema. Ele deixa de ser "às vezes o cursor anda
+sozinho" e passa a ter um caminho que reproduz.
+
+E a diferença entre os dois caminhos é a pista. Os dois re-executam
+`setup()`, então "as primeiras leituras do ADC são ruidosas" não explicaria
+só um deles. O que os separa é que o wake de deep sleep **desliga e religa o
+domínio analógico**, enquanto o `esp_restart()` da troca OTA reinicia o lado
+digital e deixa RTC/analógico em grande parte como o firmware anterior
+deixou. Ou seja: as primeiras conversões depois de uma troca OTA saem através
+do estado que o *leitor* configurou. E nesta escada resistiva compartilhada o
+RIGHT é a banda mais baixa, então qualquer leitura enviesada para baixo cai
+nele especificamente.
+
+Isso também explica, retroativamente, por que o A/B da tela de Sync não
+serviria: além de não haver nada visual ali para observar (o usuário notou
+isso antes de eu notar), o experimento estava medindo a coisa errada — DFS
+durante o uso, e não o estado do periférico logo depois do boot.
+
+**A correção:** nada é aceito enquanto os botões não tiverem sido vistos em
+repouso, e nada nos primeiros 500ms. Um toque que nunca foi precedido de uma
+soltura não é um toque.
+
+Ela mascara as leituras em vez de retornar cedo — um `return` pularia também
+o botão de power, e uma linha do d-pad presa deixaria o aparelho sem como
+dormir ou acordar. (Escrito com o `return` primeiro; o problema apareceu ao
+reler, antes de qualquer teste.)
+
+Não apresentado como causa raiz provada: isso exigiria traços do ADC que
+ninguém tirou. Mas a guarda está certa de qualquer forma que a causa caia, e
+faz a coisa certa também se um botão estiver genuinamente pressionado no
+boot.
+
+- [ ] **Testar:** entrar pelo CrossPoint e chamar o MicroWriter deve abrir na
+      primeira opção do menu, como o wake já faz.
+
 ### Testar no aparelho
 
 Gravado no slot `app1` (0x650000). O que precisa de confirmação:
 
 - [x] Nomear uma nota com acento — "Ação", "Coração" — produz `acao.txt`,
       `coracao.txt`. Antes saía `aao.txt`, comendo a letra. **Confirmado.**
-- [ ] Digitar "Coração.txt" no campo de título também dá `coracao.txt`, não
-      mais `coracaotxt.txt`.
+- [x] Digitar "Coração.txt" no campo de título também dá `coracao.txt`, não
+      mais `coracaotxt.txt`. **Confirmado** (testado como "Ação.txt").
+- [x] Sync com rede já gravada reconecta direto. **Confirmado.**
 - [x] Abrir o editor de título e confirmar **sem mudar nada** deixa o nome
       igual. Antes virava `nome_2.txt`. **Confirmado.**
 - [x] Copiar e colar continuam funcionando (o clipboard agora é alocado na
@@ -700,10 +745,9 @@ Gravado no slot `app1` (0x650000). O que precisa de confirmação:
 - [ ] Sync: "Save password?" fica na tela até você responder, e responder
       Enter faz a rede ser reconhecida na próxima vez sem perguntar.
 - [ ] Sync: a sessão sobrevive alguns minutos de leitura sem cair.
-- [ ] **O A/B do botão fantasma**, que agora não custa nada: enquanto a tela
-      de Sync está aberta o clock fica fixo em 80MHz sem light sleep. Se os
-      toques espúrios pararem ali e voltarem ao sair, o gerenciamento de
-      energia está confirmado como causa.
+- [~] O A/B do botão fantasma pela tela de Sync: **descartado.** Não há nada
+      visual ali cuja seleção se possa observar andando. Substituído pelo
+      gatilho determinístico acima, que é melhor.
 
 ### Two notes for whoever debugs this next
 
