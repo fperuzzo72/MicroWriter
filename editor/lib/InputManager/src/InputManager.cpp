@@ -21,6 +21,7 @@ const char* InputManager::BUTTON_NAMES[] = {"Back", "Confirm", "Left", "Right", 
 
 InputManager::InputManager()
     : settled(false),
+      idleSince(0),
       currentState(0),
       lastState(0),
       pressedEvents(0),
@@ -88,7 +89,9 @@ void InputManager::update() {
   // have been pressed. Costs a released-then-pressed at boot for anyone
   // genuinely holding a key down, which is the correct behaviour anyway.
   if (!settled) {
-    if (state != 0) return;
+    if (state != 0) { idleSince = 0; return; }        // still glitching
+    if (idleSince == 0) { idleSince = currentTime; return; }
+    if (currentTime - idleSince < SETTLE_IDLE_MS) return;
     settled = true;
   }
 

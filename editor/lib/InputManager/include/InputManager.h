@@ -97,7 +97,16 @@ class InputManager {
   // raw state rather than the debounced one matters as well -- an earlier
   // attempt gated on isPressed(), which lags by the debounce interval and so
   // reported "idle" during the very glitch it meant to skip.
+  //
+  // And one idle reading is not enough. The first version settled on the
+  // first sample that said "nothing pressed", which works if the glitch comes
+  // first and fails if it comes *after* an idle sample -- observed as the
+  // cursor jumping exactly once just after boot and never again. The measured
+  // glitches were 130ms apart, so settling requires the raw state to have
+  // been idle continuously for rather longer than that.
   bool settled;
+  unsigned long idleSince;
+  static constexpr unsigned long SETTLE_IDLE_MS = 300;
 
   uint8_t currentState;
   uint8_t lastState;
