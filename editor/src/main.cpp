@@ -18,6 +18,9 @@
 #include "file_manager.h"
 #include "ui_renderer.h"
 #include "wifi_sync.h"
+#include "sd_datetime.h"
+
+#include <sys/time.h>  // settimeofday(), na entrega para outra particao
 
 // Enum for sleep reasons
 enum class SleepReason {
@@ -190,6 +193,36 @@ void switchToOtaApp(int index) {
     return;
   }
   confirmLastOtaSwitch();
+
+  // Zera o relogio de sistema antes de entregar o controle.
+  //
+  // Sem DS3231 (o X4 nao tem: HalClock::begin() do leitor desiste se nao for
+  // um X3), o CPR-vCodex guarda o dia em /.crosspoint/state.json no cartao, no
+  // campo lastKnownValidTimestamp, e o atualiza com
+  //
+  //     lastKnownValidTimestamp =
+  //         std::max(lastKnownValidTimestamp, getCurrentValidTimestamp());
+  //
+  // considerando valido qualquer relogio ACIMA de 2024-01-01 -- so rejeita
+  // valores pequenos demais, nunca grandes demais.
+  //
+  // Numa troca de particao o relogio volta com lixo: a referencia do ESP-IDF
+  // (s_boot_time) fica na memoria RTC, cujo layout o linker define por
+  // binario, e nos declaramos zero variaveis ali enquanto o leitor declara
+  // onze. O lixo observado foi 4154457600 -- 26/08/2101. Sendo maior que 2024
+  // passa na validacao, o max o adota, e fica **gravado no cartao**. Como e
+  // max nunca mais desce: so o "Set date" manual conserta.
+  //
+  // Zerando aqui, getCurrentValidTimestamp() devolve 0, o max fica com o valor
+  // que ja estava no arquivo, e a data guardada e preservada. Nao se perde
+  // sincronia -- apenas este boot nao conta como sincronizado, que ja e o
+  // normal num X4 depois de qualquer evento de energia.
+  //
+  // Diagnosticado no MicroBASIC; ver o log de desenvolvimento de la para o
+  // levantamento completo, inclusive as hipoteses que foram descartadas.
+  struct timeval tv = {};
+  settimeofday(&tv, nullptr);
+
   esp_restart();
 }
 
@@ -268,6 +301,7 @@ void setup() {
   editorInit();
   inputSetup();
   fileManagerSetup();
+  sdDateTimeSetup();  // data dos arquivos no SD -- ver sd_datetime.h
 
   // Migrate the settings/backup dir before anything reads or writes it
   // (BLE pairing, WiFi credentials, UI prefs below all live under it).

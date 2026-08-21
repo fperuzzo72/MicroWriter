@@ -824,3 +824,49 @@ And there is now a free A/B for it, costing nothing to run: **the sync screen
 already pins the clock at 80MHz with light sleep off.** If the spurious
 presses stop while that screen is open and resume on leaving it, the power
 management is confirmed as the cause without writing a line of code.
+
+## Data dos arquivos no SD, e o relogio na entrega
+
+Trazido do MicroBASIC, onde foi diagnosticado. O levantamento completo --
+inclusive as hipoteses descartadas -- esta no log de la; aqui fica o
+essencial e o que e especifico deste firmware.
+
+**Zerar o relogio antes de trocar de particao.** O CPR-vCodex guarda o dia
+em `/.crosspoint/state.json` no cartao e o atualiza com `std::max`, aceitando
+qualquer relogio acima de 2024-01-01 -- so tem piso, nunca teto. Numa troca de
+particao o relogio de sistema volta com lixo (a referencia do ESP-IDF vive na
+memoria RTC, cujo layout o linker define por binario), e o lixo observado foi
+26/08/2101. Sendo maior que 2024 passa, o `max` adota, e fica gravado no
+cartao para sempre -- so o "Set date" manual conserta. Zerando o relogio antes
+do `esp_restart()`, o `max` fica com o valor do arquivo e a data e preservada.
+
+**Data nos arquivos gravados.** Sem callback registrado o SdFat nao escreve os
+campos de data, e a FAT le zero como 1980. Passamos a registrar um, com a data
+vinda do `lastKnownValidTimestamp` do proprio leitor, caindo para a data de
+compilacao quando o arquivo nao existe, nao abre, nao tem o campo, tem 0, ou
+tem valor implausivel -- nenhum deles tratado como erro.
+
+Duas coisas herdadas junto, e vale saber delas:
+
+- **A hora fica adiantada pelo fuso** (3h aqui). Usamos `gmtime_r`, a FAT
+  guarda hora local. Corrigir exigiria copiar a tabela de fusos do leitor,
+  porque o ajuste dele guarda so o indice -- e herdar o risco de ela
+  reordenar em silencio. Decidido deixar assim: a data esta certa, e para
+  ordenar arquivos nao muda nada.
+- **Verificado somente contra o CPR-vCodex.** CrossPoint e CrossInk nao foram
+  testados e provavelmente nao mantem nada parecido. Por isso a ausencia do
+  arquivo e caso normal, nao excecao.
+
+### Auditoria: o que mais faltava aqui
+
+Comparados todos os arquivos compartilhados entre os dois firmwares. Fora
+estes dois, o que difere e funcionalidade que so existe la (interpretador,
+editor de tela, VC, colecoes de arquivo, Game Buttons) ou nome de pasta. As
+correcoes de sync, o `ascii_fold`, o `except` do rename, o clipboard alocado
+sob demanda e a guarda do `InputManager` ja estavam nos dois.
+
+Uma unica diferenca menor ficou de fora de proposito: o MicroBASIC tem um
+`DBG_PRINTF` extra em `ble_keyboard.cpp` mostrando heap livre e maior bloco
+antes do `xTaskCreate` de 20KB. E instrumentacao, compilada fora em release,
+e foi ela que identificou a falha silenciosa de conexao BLE. Vale copiar se
+esse problema reaparecer aqui.
