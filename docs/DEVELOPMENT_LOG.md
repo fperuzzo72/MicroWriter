@@ -932,3 +932,18 @@ A mecanica foi reproduzida sobre um buffer no host e exercitada nos cinco
 casos antes de gravar: apagar selecao, cortar, colar solto, colar sobre
 selecao, e Ctrl+Z sem registro. O quarto -- colar sobre selecao desfazendo a
 operacao **inteira** -- era o que tinha mais chance de sair pela metade.
+
+### Confirmado no aparelho
+
+Nota nova gravada, e nenhum `.bak` ao lado dela.
+
+Verificado por um caminho que vale registrar como tecnica: **o CrossPoint
+navega o cartao inteiro**, entao da para inspecionar o estado do SD sem PC e
+sem cabo -- e sem tirar o cartao, que e como se perde um. Util para qualquer
+duvida sobre o que este firmware deixou gravado; foi assim que se confirmou a
+ausencia do backup.
+
+Os `.bak` que ja existiam foram apagados a mao no PC. Uma varredura no
+arranque chegou a ser considerada e foi descartada: apagar arquivos do usuario
+em massa, automaticamente, no boot, e um poder que este firmware nao precisa
+ter -- ainda mais tendo o proprio leitor como navegador de arquivos.
