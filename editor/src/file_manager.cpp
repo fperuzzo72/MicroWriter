@@ -226,6 +226,21 @@ void saveCurrentFile(bool refreshList) {
   // Step 4: Promote .tmp → original
   SdMan.rename(tmpPath, path);
 
+  // Step 5: Discard the backup. It has done its job.
+  //
+  // The .bak exists to survive a power cut *during* the save: between steps 3
+  // and 4 the note's name points at nothing, and without it the old content
+  // would be gone. Once step 4 has completed, the note is whole on the card
+  // and the copy protects nothing -- it just doubles what the notes occupy and
+  // leaves the card full of duplicates when read on a PC.
+  //
+  // What this gives up, deliberately: recovering the *previous* version by
+  // hand, which was never offered in the UI and only ever worked by digging
+  // through the card. The crash safety, which is the point, is untouched --
+  // it lives in the .tmp / rotate / promote sequence above, not in keeping
+  // the file afterwards.
+  SdMan.remove(bakPath);
+
   editorSetUnsavedChanges(false);
   if (refreshList) refreshFileList();
   SdMan.sleep();
