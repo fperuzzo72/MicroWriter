@@ -857,6 +857,20 @@ Duas coisas herdadas junto, e vale saber delas:
   testados e provavelmente nao mantem nada parecido. Por isso a ausencia do
   arquivo e caso normal, nao excecao.
 
+### Confirmado no aparelho
+
+Arquivo novo e arquivo carregado-e-regravado saem os dois com a **data de
+compilacao, 00:00**. E o esperado neste aparelho e confirma o caminho de
+fallback inteiro: o cartao aqui tem CrossPoint, que usa o mesmo
+`/.crosspoint/state.json` mas **nao guarda** `lastKnownValidTimestamp` -- o
+arquivo existe, a chave nao, e o codigo cai no fallback sem tratar isso como
+erro. Antes desta mudanca os mesmos arquivos apareciam em 1980.
+
+Vale notar que os dois casos foram cobertos: criar e regravar. O
+`saveCurrentFile()` escreve num `.tmp` e renomeia por cima, entao o arquivo
+final e sempre recem-criado, e o SdFat ainda reescreve a data a cada `sync()`
+de arquivo sujo.
+
 ### Auditoria: o que mais faltava aqui
 
 Comparados todos os arquivos compartilhados entre os dois firmwares. Fora
