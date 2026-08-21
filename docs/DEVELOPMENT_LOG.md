@@ -906,6 +906,12 @@ O buffer de desfazer e alocado sob demanda, como o clipboard e pelo mesmo
 motivo: 16KB estaticos sairiam do maior bloco contiguo, que a task de conexao
 BLE precisa inteiro.
 
+### Confirmado no aparelho
+
+Os cinco casos passaram: apagar selecao e desfazer, cortar e desfazer, colar
+solto e desfazer, colar sobre selecao e desfazer a operacao inteira, e Ctrl+Z
+sem registro nao fazendo nada. Clean mode responde no Ctrl+L.
+
 ### Verificado fora do aparelho
 
 A mecanica foi reproduzida sobre um buffer no host e exercitada nos cinco
