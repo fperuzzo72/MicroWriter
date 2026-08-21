@@ -45,7 +45,23 @@ void editorDeleteSelection();   // no-op if none
 void editorCopySelection();   // no-op if no selection
 void editorCutSelection();    // copy, then editorDeleteSelection()
 void editorPasteAtCursor();   // no-op if the clipboard is empty
+void editorPasteOverSelection();  // substitui a selecao como UMA operacao
 bool editorHasClipboardContent();
+
+// --- Desfazer, um nivel ---------------------------------------------------
+// Guarda a ULTIMA operacao em bloco -- apagar selecao, cortar, colar -- e a
+// desfaz. Existe pelo caso que se perde de verdade: selecionar um trecho e
+// apaga-lo com DEL ou BACKSPACE, que ao contrario do cortar nao deixa copia
+// no clipboard.
+//
+// Deliberadamente NAO cobre digitacao. Um registro por caractere digitado
+// custaria o mesmo que uma pilha de desfazer inteira, e um registro que
+// sobrevive a digitacao seria pior: apertar Ctrl+Z depois de escrever um
+// paragrafo reinseriria um trecho apagado minutos antes, do nada. Entao
+// qualquer edicao que nao seja bloco **descarta** o registro, e o Ctrl+Z
+// passa a nao fazer nada -- previsivel, mesmo que limitado.
+void editorUndo();
+bool editorCanUndo();
 
 // Line/viewport management
 //

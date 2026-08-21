@@ -120,6 +120,7 @@ static constexpr uint8_t HID_KEY_V          = 0x19;
 static constexpr uint8_t HID_KEY_X          = 0x1B;
 static constexpr uint8_t HID_KEY_F          = 0x09;
 static constexpr uint8_t HID_KEY_N          = 0x11;
+static constexpr uint8_t HID_KEY_L          = 0x0F;  // Ctrl+L: clean mode
 static constexpr uint8_t HID_KEY_P          = 0x13;
 static constexpr uint8_t HID_KEY_Q          = 0x14;
 static constexpr uint8_t HID_KEY_R          = 0x15;

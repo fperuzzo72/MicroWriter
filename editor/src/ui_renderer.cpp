@@ -467,7 +467,7 @@ void drawTextEditor(GfxRenderer& renderer, HalGPIO& gpio) {
 
   // --- TYPEWRITER MODE ---
   if (writingMode == WritingMode::TYPEWRITER) {
-    // In clean mode (Ctrl+Z): just text on blank screen, no header
+    // In clean mode (Ctrl+L): just text on blank screen, no header
     int textAreaTop = cleanMode ? 0 : drawEditorHeader(renderer, gpio, sw, tc);
 
     // Center the current line vertically

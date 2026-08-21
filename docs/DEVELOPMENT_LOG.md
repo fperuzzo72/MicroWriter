@@ -870,3 +870,45 @@ Uma unica diferenca menor ficou de fora de proposito: o MicroBASIC tem um
 antes do `xTaskCreate` de 20KB. E instrumentacao, compilada fora em release,
 e foi ela que identificou a falha silenciosa de conexao BLE. Vale copiar se
 esse problema reaparecer aqui.
+
+## Copiar/colar completo: o que faltava era desfazer
+
+Pedido como "incluir Ctrl+X para cortar e um Ctrl+Z". Lendo o codigo, **o
+Ctrl+X ja existia** -- `editorCutSelection()` copia e apaga, corretamente. O
+que faltava mesmo era o desfazer, e ele veio com uma colisao: **o Ctrl+Z ja
+estava ocupado**, alternando o clean mode.
+
+Clean mode foi para o **Ctrl+L**. Ctrl+Z e desfazer em qualquer editor, e um
+atalho que faz outra coisa nesse lugar surpreende exatamente quando a pessoa
+mais precisa dele -- logo depois de apagar algo por engano.
+
+### O desenho, e o que ele deliberadamente nao faz
+
+Um nivel, cobrindo operacoes **em bloco**: apagar selecao, cortar, colar. E o
+caso que se perde de verdade -- selecionar um trecho e apagar com DEL ou
+BACKSPACE, que ao contrario do cortar nao deixa copia no clipboard.
+
+Uma estrutura so descreve os tres: na posicao `pos`, entraram `inserted`
+bytes e sairam os `removed` guardados. Desfazer e o inverso na ordem inversa.
+Isso importa para um caso especifico: **colar por cima de uma selecao**. O
+handler antes chamava `editorDeleteSelection()` e depois `editorPasteAtCursor()`
+-- dois registros, e o Ctrl+Z desfaria so a colagem, deixando o trecho apagado
+perdido. Agora e `editorPasteOverSelection()`, uma operacao com um registro.
+
+**Digitacao nao e coberta, e o registro e descartado por ela.** Um registro
+por caractere custaria o mesmo que uma pilha inteira; e um registro que
+sobrevive a digitacao seria pior que nenhum -- apertar Ctrl+Z depois de
+escrever um paragrafo reinseriria, do nada, um trecho apagado minutos antes.
+Assim o Ctrl+Z ou desfaz a ultima operacao em bloco, ou nao faz nada.
+Limitado, mas nunca surpreendente.
+
+O buffer de desfazer e alocado sob demanda, como o clipboard e pelo mesmo
+motivo: 16KB estaticos sairiam do maior bloco contiguo, que a task de conexao
+BLE precisa inteiro.
+
+### Verificado fora do aparelho
+
+A mecanica foi reproduzida sobre um buffer no host e exercitada nos cinco
+casos antes de gravar: apagar selecao, cortar, colar solto, colar sobre
+selecao, e Ctrl+Z sem registro. O quarto -- colar sobre selecao desfazendo a
+operacao **inteira** -- era o que tinha mais chance de sair pela metade.

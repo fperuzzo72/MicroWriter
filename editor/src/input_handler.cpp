@@ -143,6 +143,15 @@ static void handleEditorKey(uint8_t keyCode, uint8_t modifiers) {
       return;
     }
     if (keyCode == HID_KEY_Z) {
+      editorUndo();
+      screenDirty = true;
+      return;
+    }
+    // Clean mode saiu do Ctrl+Z para o Ctrl+L. O Ctrl+Z e desfazer em
+    // qualquer editor, e um atalho que faz outra coisa nesse lugar surpreende
+    // exatamente quando a pessoa mais precisa dele -- logo depois de apagar
+    // algo por engano.
+    if (keyCode == HID_KEY_L) {
       cleanMode = !cleanMode;
       screenDirty = true;
       return;
@@ -187,8 +196,7 @@ static void handleEditorKey(uint8_t keyCode, uint8_t modifiers) {
       return;
     }
     if (keyCode == HID_KEY_V) {
-      if (editorHasSelection()) editorDeleteSelection();
-      editorPasteAtCursor();
+      editorPasteOverSelection();
       screenDirty = true;
       return;
     }
